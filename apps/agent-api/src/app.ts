@@ -594,6 +594,25 @@ export class ApiController {
   @Get('tasks/:id/events') events(@Param('id') id: string) {
     return this.r.db.events(id);
   }
+  @Get('tasks/:id/permissions') taskPermissions(@Param('id') id: string) {
+    return this.r.db.permissionRequest(id) ?? { status: 'none' };
+  }
+  @Post('permission-requests/:id/approve') approvePermission(
+    @Param('id') id: string,
+    @Body() body: { scope?: 'once' | 'all' },
+  ) {
+    const scope = body.scope === 'all' ? 'all' : 'once';
+    const request = this.r.db.decidePermission(id, 'approved', scope);
+    if (!request) throw new NotFoundException();
+    void this.r.orchestrator.resumeAfterPermission(request.taskId, scope);
+    return request;
+  }
+  @Post('permission-requests/:id/reject') rejectPermission(@Param('id') id: string) {
+    const request = this.r.db.decidePermission(id, 'rejected', 'once');
+    if (!request) throw new NotFoundException();
+    this.r.orchestrator.rejectPermission(request.taskId);
+    return request;
+  }
   @Get('agents') agentRuns() {
     return this.r.db.agentFlow();
   }

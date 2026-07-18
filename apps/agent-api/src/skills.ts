@@ -105,7 +105,22 @@ export function routeSkills(analysis: TaskAnalysis): SkillRoutingResult {
     missingCapabilities,
   };
 }
-export function createPlan(analysis: TaskAnalysis, routing: SkillRoutingResult): ExecutionPlan {
+export function inferFilesystemPath(input: string) {
+  const normalized = input.replace(/\\/g, '/');
+  const quoted = [...normalized.matchAll(/["'`](.+?\.[a-z0-9]{1,12})["'`]/gi)].at(-1)?.[1];
+  if (quoted) return quoted;
+
+  const match = normalized.match(
+    /(?:^|\s)((?:[a-z]:\/)?[^\s"'`<>|:*?]*[a-z0-9_.-]+\.[a-z0-9]{1,12})(?=\s|$|[),.;:!?])/i,
+  );
+  return match?.[1]?.replace(/^\.\//, '') ?? '.';
+}
+
+export function createPlan(
+  analysis: TaskAnalysis,
+  routing: SkillRoutingResult,
+  originalInput = '',
+): ExecutionPlan {
   const selected = routing.selectedSkillIds.length
     ? routing.selectedSkillIds.slice(0, 1)
     : ['markdown-report'];
@@ -117,7 +132,12 @@ export function createPlan(analysis: TaskAnalysis, routing: SkillRoutingResult):
       title: `Thực thi ${skillId}`,
       description: `Dùng ${skillId} để đáp ứng tác vụ`,
       skillId,
-      input: { path: '.' },
+      input: {
+        path:
+          skillId === 'filesystem-reader' || skillId === 'code-analyzer'
+            ? inferFilesystemPath(originalInput)
+            : '.',
+      },
       expectedOutput: 'Kết quả có cấu trúc',
       risk: manifests.find((s) => s.id === skillId)?.riskLevel === 'medium' ? 'medium' : 'low',
     })),

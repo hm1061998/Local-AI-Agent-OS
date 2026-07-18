@@ -14,11 +14,16 @@ import {
   Orchestrator,
   assertTransition,
   normalizeLanguageTask,
+  isRecoverableSkillFailure,
+  isRequestEcho,
+  requiresUserPermission,
+  selectSkillsForCapabilities,
 } from '../src/orchestrator';
 import {
   allowedCommands,
   assertAllowedCommand,
   createPlan,
+  inferFilesystemPath,
   manifests,
   routeSkills,
   safePath,
@@ -45,6 +50,77 @@ describe('language task normalization', () => {
     expect(normalized.category).toBe('general');
     expect(normalized.requiredCapabilities).toEqual(['language:define']);
   });
+  it('preserves file reading as a dependency of translation', () => {
+    const normalized = normalizeLanguageTask('đọc file README.md và dịch sang tiếng Việt', {
+      ...analysis,
+      objectives: ['read file', 'translate content'],
+    });
+    expect(normalized.requiredCapabilities).toEqual(['filesystem:read', 'language:translate']);
+  });
+});
+
+describe('multi-objective planning', () => {
+  const translation = skillManifestSchema.parse({
+    ...manifests[0],
+    id: 'language-translate',
+    name: 'Language Translate',
+    runtime: { type: 'prompt', timeoutSeconds: 30 },
+    capabilities: ['language:translate'],
+  });
+  const records = [
+    { id: manifests[0]!.id, name: manifests[0]!.name, description: '', manifest: manifests[0]! },
+    { id: translation.id, name: translation.name, description: '', manifest: translation },
+  ];
+  it('selects one skill for every required capability in dependency order', () => {
+    expect(
+      selectSkillsForCapabilities(records, ['filesystem:read', 'language:translate']).map(
+        (skill) => skill.id,
+      ),
+    ).toEqual(['filesystem-reader', 'language-translate']);
+  });
+  it('rejects output that merely repeats the user request', () => {
+    const request = 'đọc file README.md và dịch nội dung sang tiếng Việt';
+    expect(isRequestEcho(request, request)).toBe(true);
+    expect(isRequestEcho(request, 'Đây là nội dung README đã được dịch.')).toBe(false);
+  });
+});
+
+describe('task permission gate', () => {
+  it('requires approval for write, command, network and environment permissions', () => {
+    const manifest = skillManifestSchema.parse({
+      id: 'writer',
+      name: 'Writer',
+      version: '1.0.0',
+      description: 'writes output',
+      tags: [],
+      triggers: [],
+      runtime: { type: 'prompt', timeoutSeconds: 30 },
+      inputSchema: {},
+      outputSchema: {},
+      permissions: {
+        filesystem: { read: [], write: ['Uploads/**'], delete: [] },
+        commands: [],
+        network: { enabled: false, allowedHosts: [] },
+        environmentVariables: [],
+      },
+      riskLevel: 'medium',
+      approvalRequired: false,
+      capabilities: ['file:write'],
+    });
+    expect(requiresUserPermission(manifest)).toBe(true);
+  });
+});
+
+describe('adaptive skill recovery', () => {
+  it('recovers ordinary skill compatibility failures', () => {
+    expect(isRecoverableSkillFailure('EISDIR: illegal operation on a directory')).toBe(true);
+    expect(isRecoverableSkillFailure('ENOENT: file not found')).toBe(true);
+  });
+  it('never bypasses security, cancellation or budget failures', () => {
+    expect(isRecoverableSkillFailure('WORKSPACE_ACCESS_DENIED')).toBe(false);
+    expect(isRecoverableSkillFailure('TASK_CANCELLED')).toBe(false);
+    expect(isRecoverableSkillFailure('BUDGET_EXCEEDED')).toBe(false);
+  });
 });
 
 describe('schemas', () => {
@@ -64,6 +140,13 @@ describe('routing and planning', () => {
     expect(
       validatePlan(createPlan(analysis, routeSkills(analysis)), 8).steps.length,
     ).toBeGreaterThan(0));
+  it('passes the requested file to filesystem reader', () => {
+    const request = 'đọc nội dung file README.md trong thư mục local-ai-agent-os';
+    expect(inferFilesystemPath(request)).toBe('README.md');
+    expect(createPlan(analysis, routeSkills(analysis), request).steps[0]?.input).toEqual({
+      path: 'README.md',
+    });
+  });
   it('rejects excess', () =>
     expect(() =>
       validatePlan(

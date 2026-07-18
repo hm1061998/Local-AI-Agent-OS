@@ -83,6 +83,83 @@ function Node3D({
     </group>
   );
 }
+function JarvisShell({ reduced }: { reduced: boolean }) {
+  const shell = useRef<any>(null);
+  const rings = useRef<any>(null);
+  useFrame((_, delta) => {
+    if (reduced) return;
+    if (shell.current) shell.current.rotation.y += delta * 0.035;
+    if (rings.current) {
+      rings.current.rotation.x += delta * 0.025;
+      rings.current.rotation.z -= delta * 0.018;
+    }
+  });
+  return (
+    <group>
+      <group ref={shell}>
+        <mesh>
+          <sphereGeometry args={[5.78, 32, 20]} />
+          <meshBasicMaterial
+            color="#3fffe0"
+            wireframe
+            transparent
+            opacity={0.035}
+            depthWrite={false}
+          />
+        </mesh>
+        <mesh>
+          <icosahedronGeometry args={[5.72, 2]} />
+          <meshBasicMaterial
+            color="#6dafff"
+            wireframe
+            transparent
+            opacity={0.045}
+            depthWrite={false}
+          />
+        </mesh>
+      </group>
+      <group ref={rings}>
+        {[
+          { radius: 4.2, rotation: [Math.PI / 2, 0, 0] },
+          { radius: 5.05, rotation: [Math.PI / 2.8, Math.PI / 5, 0] },
+          { radius: 6.15, rotation: [Math.PI / 2.2, -Math.PI / 3, Math.PI / 8] },
+        ].map((ring, index) => (
+          <mesh key={ring.radius} rotation={ring.rotation as [number, number, number]}>
+            <torusGeometry args={[ring.radius, index === 2 ? 0.012 : 0.02, 8, 128]} />
+            <meshBasicMaterial
+              color={index === 1 ? '#7cb5ff' : '#4affe0'}
+              transparent
+              opacity={index === 2 ? 0.22 : 0.36}
+              depthWrite={false}
+            />
+          </mesh>
+        ))}
+      </group>
+      <mesh>
+        <sphereGeometry args={[1.18, 32, 32]} />
+        <meshBasicMaterial color="#7effe8" transparent opacity={0.035} depthWrite={false} />
+      </mesh>
+      <pointLight color="#61ffe2" intensity={5} distance={10} />
+    </group>
+  );
+}
+function sphericalArc(a: [number, number, number], b: [number, number, number]) {
+  const length = (value: [number, number, number]) => Math.hypot(...value);
+  const ar = length(a),
+    br = length(b);
+  if (ar < 0.5 || br < 0.5) return [a, b];
+  const radius = Math.max(ar, br) * 1.025;
+  return Array.from({ length: 9 }, (_, index): [number, number, number] => {
+    const t = index / 8;
+    const value: [number, number, number] = [
+      a[0] * (1 - t) + b[0] * t,
+      a[1] * (1 - t) + b[1] * t,
+      a[2] * (1 - t) + b[2] * t,
+    ];
+    const size = length(value) || 1;
+    return [(value[0] / size) * radius, (value[1] / size) * radius, (value[2] / size) * radius];
+  });
+}
 function Scene({
   graph,
   selected,
@@ -105,6 +182,7 @@ function Scene({
       <color attach="background" args={['#030713']} />
       <fog attach="fog" args={['#030713', 11, 28]} />
       <ambientLight intensity={0.12} />
+      <JarvisShell reduced={reduced} />
       <Sparkles
         count={quality === 'low' ? 180 : quality === 'high' ? 700 : 420}
         scale={[22, 13, 18]}
@@ -157,7 +235,7 @@ function Scene({
         return a && b ? (
           <Line
             key={edge.id}
-            points={[a, b]}
+            points={sphericalArc(a, b)}
             color={edge.active ? '#70ffe0' : edge.type === 'generated_from' ? '#b66cff' : '#2c817b'}
             lineWidth={edge.active ? 1.6 : 0.65}
             dashed={edge.type === 'generated_from'}
@@ -176,9 +254,9 @@ function Scene({
       <OrbitControls
         enableDamping={!reduced}
         autoRotate={!reduced}
-        autoRotateSpeed={0.12}
-        minDistance={6}
-        maxDistance={22}
+        autoRotateSpeed={0.28}
+        minDistance={8}
+        maxDistance={20}
       />
     </>
   );
@@ -252,14 +330,15 @@ function collectArtifactPaths(value: unknown) {
   return [...paths];
 }
 function outputFromEvent(event: AgentEvent | undefined) {
-  if (!event) return undefined;
+  if (!event || event.type !== 'TASK_COMPLETED') return undefined;
   const payload = event.payload as any;
-  if (event.type === 'STEP_COMPLETED') return payload?.result?.output ?? payload?.result;
   const result = payload?.results?.at?.(-1);
   return result?.output ?? result ?? payload;
 }
 function FriendlyOutput({ value }: { value: unknown }) {
   const [copied, setCopied] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => setCollapsed(false), [value]);
   const object =
     value && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
@@ -274,25 +353,40 @@ function FriendlyOutput({ value }: { value: unknown }) {
     ? Object.entries(object).filter(([key]) => key !== preferredKey && key !== 'artifacts')
     : [];
   const copyValue = typeof primary === 'string' ? primary : JSON.stringify(value, null, 2);
+  const preview = copyValue.replace(/\s+/g, ' ').trim();
   return (
-    <div className="friendly-output" data-testid="universe-output">
+    <div
+      className={`friendly-output ${collapsed ? 'collapsed' : ''}`}
+      data-testid="universe-output"
+    >
       <div className="result-heading">
         <span>
           <i>✓</i> Kết quả
         </span>
-        <button
-          className="secondary copy-result"
-          onClick={() =>
-            void navigator.clipboard.writeText(copyValue).then(() => {
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1500);
-            })
-          }
-        >
-          {copied ? 'Đã sao chép' : 'Sao chép'}
-        </button>
+        <div className="result-actions">
+          <button
+            className="secondary collapse-result"
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((value) => !value)}
+          >
+            {collapsed ? 'Mở rộng' : 'Thu nhỏ'}
+          </button>
+          <button
+            className="secondary copy-result"
+            onClick={() =>
+              void navigator.clipboard.writeText(copyValue).then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1500);
+              })
+            }
+          >
+            {copied ? 'Đã sao chép' : 'Sao chép'}
+          </button>
+        </div>
       </div>
-      {typeof primary === 'string' ? (
+      {collapsed ? (
+        <div className="result-preview">{preview || 'Kết quả đã được thu gọn'}</div>
+      ) : typeof primary === 'string' ? (
         <div className="result-text">{primary}</div>
       ) : Array.isArray(primary) ? (
         <ul className="result-list">
@@ -367,6 +461,53 @@ function AgentComposer({
     </section>
   );
 }
+function PermissionCard({
+  request,
+  onDecision,
+}: {
+  request: any;
+  onDecision(action: 'once' | 'all' | 'reject'): Promise<void>;
+}) {
+  const permissions = request.permissions ?? {};
+  const items = [
+    ...(permissions.filesystem?.write ?? []).map((path: string) => `Ghi file: ${path}`),
+    ...(permissions.commands ?? []).map((command: string) => `Chạy lệnh: ${command}`),
+    ...(permissions.network?.enabled
+      ? [
+          `Truy cập mạng: ${(permissions.network.allowedHosts ?? []).join(', ') || 'host được khai báo'}`,
+        ]
+      : []),
+    ...(permissions.environmentVariables ?? []).map(
+      (name: string) => `Đọc biến môi trường: ${name}`,
+    ),
+  ];
+  return (
+    <section className="permission-card">
+      <div className="permission-title">
+        <span>YÊU CẦU CẤP QUYỀN</span>
+        <b>Đang chờ</b>
+      </div>
+      <p>{request.reason}</p>
+      <ul>
+        {items.map((item: string) => (
+          <li key={item}>• {item}</li>
+        ))}
+      </ul>
+      <div className="permission-actions">
+        <button onClick={() => void onDecision('once')}>Cho phép lần này</button>
+        <button className="secondary" onClick={() => void onDecision('all')}>
+          Ủy quyền tất cả
+        </button>
+        <button className="danger" onClick={() => void onDecision('reject')}>
+          Từ chối
+        </button>
+      </div>
+      <small>
+        Ủy quyền tất cả chỉ áp dụng cho quyền an toàn đã khai báo; hành động forbidden vẫn bị chặn.
+      </small>
+    </section>
+  );
+}
 export function mergePersistedEvents(current: UniverseState, events: AgentEvent[]) {
   const known = new Set(current.events.map((event) => event.id));
   const merged = events.filter((event) => !known.has(event.id)).reduce(reduceUniverse, current);
@@ -387,6 +528,7 @@ export function Universe() {
     [telemetry, setTelemetry] = useState<any>(),
     [activeTaskId, setActiveTaskId] = useState<string>(),
     [currentRequest, setCurrentRequest] = useState(''),
+    [permissionRequest, setPermissionRequest] = useState<any>(),
     [output, setOutput] = useState<unknown>(),
     [running, setRunning] = useState(false),
     [paused, setPaused] = useState(false),
@@ -410,12 +552,12 @@ export function Universe() {
       queue.push(event);
       if (!frame) frame = requestAnimationFrame(flush);
       if (event.taskId === activeTaskId) {
+        if (event.payload && event.type === 'TASK_COMPLETED') setOutput(outputFromEvent(event));
         if (
-          event.payload &&
-          ['STEP_COMPLETED', 'RESULT_VALIDATION_COMPLETED', 'TASK_COMPLETED'].includes(event.type)
+          ['TASK_COMPLETED', 'TASK_FAILED', 'EXECUTION_CANCELLED', 'PERMISSION_REJECTED'].includes(
+            event.type,
+          )
         )
-          setOutput(outputFromEvent(event));
-        if (['TASK_COMPLETED', 'TASK_FAILED', 'EXECUTION_CANCELLED'].includes(event.type))
           setRunning(false);
       }
       if (event.type === 'SKILL_AUTO_INSTALLED')
@@ -441,26 +583,33 @@ export function Universe() {
       try {
         const events = await api.events(activeTaskId);
         if (disposed) return;
+        setError('');
         setGraph((current) => mergePersistedEvents(current, events));
         const received = events.find((event) => event.type === 'TASK_RECEIVED');
         const persistedInput = (received?.payload as any)?.input;
         if (typeof persistedInput === 'string') setCurrentRequest(persistedInput);
         const latestOutput = events
-          .filter(
-            (event) =>
-              event.payload &&
-              ['STEP_COMPLETED', 'RESULT_VALIDATION_COMPLETED', 'TASK_COMPLETED'].includes(
-                event.type,
-              ),
-          )
+          .filter((event) => event.payload && event.type === 'TASK_COMPLETED')
           .at(-1);
         if (latestOutput) setOutput(outputFromEvent(latestOutput));
         if (
           events.some((event) =>
-            ['TASK_COMPLETED', 'TASK_FAILED', 'EXECUTION_CANCELLED'].includes(event.type),
+            [
+              'TASK_COMPLETED',
+              'TASK_FAILED',
+              'EXECUTION_CANCELLED',
+              'PERMISSION_REJECTED',
+            ].includes(event.type),
           )
         )
           setRunning(false);
+        try {
+          const permission = await api.taskPermissions(activeTaskId);
+          if (!disposed)
+            setPermissionRequest(permission?.status === 'pending' ? permission : undefined);
+        } catch {
+          if (!disposed) setPermissionRequest(undefined);
+        }
       } catch (reason) {
         if (!disposed) setError(reason instanceof Error ? reason.message : String(reason));
       }
@@ -488,6 +637,7 @@ export function Universe() {
       setOutput(undefined);
       setRunning(true);
       setCurrentRequest(request);
+      setPermissionRequest(undefined);
       setActiveTaskId(undefined);
       setGraph((current) => resetUniverseExecution(current));
       const task = await api.create(request);
@@ -582,6 +732,16 @@ export function Universe() {
                 ))}
               </ol>
             </details>
+          )}
+          {permissionRequest && (
+            <PermissionCard
+              request={permissionRequest}
+              onDecision={async (action) => {
+                if (action === 'reject') await api.rejectPermission(permissionRequest.id);
+                else await api.approvePermission(permissionRequest.id, action);
+                setPermissionRequest(undefined);
+              }}
+            />
           )}
           <div className="trace-panel">
             <div className="console-title">

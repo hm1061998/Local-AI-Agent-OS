@@ -32,14 +32,12 @@ export interface UniverseState {
 export const clampNodeSize = (usage: number) =>
   Math.max(0.55, Math.min(1.8, 0.55 + Math.log2(usage + 1) * 0.18));
 export function radialPosition(index: number, total: number, radius = 6): [number, number, number] {
+  if (total <= 1) return [0, radius, 0];
   const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const y = 1 - (index / (total - 1)) * 2;
+  const ringRadius = Math.sqrt(Math.max(0, 1 - y * y));
   const angle = index * goldenAngle;
-  const spread = radius * (0.34 + 0.66 * Math.sqrt((index + 1) / Math.max(1, total)));
-  return [
-    Math.cos(angle) * spread,
-    Math.sin(index * 1.71) * 2.3,
-    Math.sin(angle) * spread * 0.72 + Math.cos(index * 0.93) * 1.4,
-  ];
+  return [Math.cos(angle) * ringRadius * radius, y * radius, Math.sin(angle) * ringRadius * radius];
 }
 export function graphFromSkills(skills: any[]): UniverseState {
   const agent: SkillGraphNode = {

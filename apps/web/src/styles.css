@@ -308,6 +308,56 @@ select {
   border-color: #55ffc5;
   box-shadow: 0 0 8px #55ffc555;
 }
+.permission-card {
+  margin: 0;
+  padding: 13px 14px;
+  border: 1px solid #8a6b25;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #211b0d, #11130e);
+  font-size: 12px;
+}
+.permission-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #e7c66f;
+  letter-spacing: 0.09em;
+}
+.permission-title b {
+  color: #ffd166;
+}
+.permission-card p {
+  margin: 9px 0;
+  color: #f1ead7;
+}
+.permission-card ul {
+  margin: 6px 0 10px;
+}
+.permission-card li {
+  display: block;
+  padding: 3px 0;
+  border: 0;
+  color: #c9baa0;
+}
+.permission-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 7px;
+}
+.permission-actions button {
+  padding: 8px 9px;
+  font-size: 10px;
+}
+.permission-actions .danger {
+  background: #402020;
+  color: #ffaaa3;
+}
+.permission-card > small {
+  display: block;
+  margin-top: 8px;
+  color: #887d69;
+  line-height: 1.4;
+}
 .trace-panel {
   overflow: auto;
   min-height: 0;
@@ -436,11 +486,32 @@ select {
   color: #55ffc5;
   font-style: normal;
 }
+.result-actions {
+  display: flex;
+  gap: 6px;
+}
+.collapse-result,
 .copy-result {
   padding: 6px 10px;
   font-size: 11px;
 }
+.result-preview {
+  overflow: hidden;
+  color: #9bc4c2;
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.friendly-output.collapsed {
+  padding-block: 10px;
+}
+.friendly-output.collapsed .result-heading {
+  margin-bottom: 6px;
+}
 .result-text {
+  max-height: min(48vh, 520px);
+  overflow-y: auto;
   padding: 14px;
   border: 1px solid #24484c;
   border-radius: 10px;
@@ -450,6 +521,18 @@ select {
   line-height: 1.65;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  scrollbar-color: #286071 #071216;
+  scrollbar-width: thin;
+}
+.result-text::-webkit-scrollbar {
+  width: 7px;
+}
+.result-text::-webkit-scrollbar-track {
+  background: #071216;
+}
+.result-text::-webkit-scrollbar-thumb {
+  border-radius: 8px;
+  background: #286071;
 }
 .result-list {
   list-style: disc;

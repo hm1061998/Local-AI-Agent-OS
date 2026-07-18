@@ -3,7 +3,9 @@ import type { AgentEvent, ModelHealth, TaskRecord } from '@local-agent/agent-pro
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${url}`, init);
   if (!response.ok) throw new Error(await response.text());
-  return response.json() as Promise<T>;
+  const body = await response.text();
+  if (!body.trim()) return undefined as T;
+  return JSON.parse(body) as T;
 }
 export const api = {
   health: () => json<ModelHealth>('/models/health'),
@@ -78,5 +80,14 @@ export const api = {
     }),
   benchmark: () => json<any>('/benchmarks/multi-agent'),
   artifactUrl: (path: string) => `/api/artifacts?path=${encodeURIComponent(path)}`,
+  taskPermissions: (id: string) => json<any>(`/tasks/${id}/permissions`),
+  approvePermission: (id: string, scope: 'once' | 'all') =>
+    json<any>(`/permission-requests/${id}/approve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    }),
+  rejectPermission: (id: string) =>
+    json<any>(`/permission-requests/${id}/reject`, { method: 'POST' }),
 };
 export const socket = io('/agent', { path: '/socket.io' });

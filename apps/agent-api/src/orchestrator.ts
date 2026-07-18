@@ -10,7 +10,7 @@ import type {
 import { ModelProviderError, type ModelProvider } from '@local-agent/model-provider';
 import { DEFAULT_BUDGET, taskAnalysisSchema } from '@local-agent/shared-types';
 import { AgentDatabase } from './database';
-import { createPlan, executeSkill, validatePlan } from './skills';
+import { createPlan, executeSkill, inferFilesystemPath, validatePlan } from './skills';
 import { createProposal } from './phase2';
 
 const meaningfulValueSchema = z
@@ -27,6 +27,26 @@ const skillExecutionResultSchema = z.object({
   summary: z.string().min(1).optional(),
   artifacts: z.array(z.string()).optional(),
 });
+const repairedSkillInputSchema = z.object({
+  input: z.record(z.string(), z.unknown()),
+});
+const recoveryWorkflowSchema = z.object({
+  wrappedSkillId: z.string(),
+  correctedInput: z.record(z.string(), z.unknown()).optional(),
+  generatedFromError: z.string().optional(),
+});
+
+const nonRecoverableSkillErrors = new Set([
+  'WORKSPACE_ACCESS_DENIED',
+  'TASK_CANCELLED',
+  'BUDGET_EXCEEDED',
+  'OLLAMA_UNAVAILABLE',
+  'MODEL_NOT_FOUND',
+]);
+
+export function isRecoverableSkillFailure(reason: string) {
+  return !nonRecoverableSkillErrors.has(reason);
+}
 
 export class BudgetGuard {
   modelCalls = 0;
@@ -50,7 +70,7 @@ export class BudgetGuard {
 const transitions: Record<AgentState, AgentState[]> = {
   idle: ['analyzing_task', 'cancelled'],
   analyzing_task: ['searching_skills', 'failed', 'cancelled'],
-  searching_skills: ['planning', 'creating_skill', 'failed', 'cancelled'],
+  searching_skills: ['planning', 'creating_skill', 'waiting_for_approval', 'failed', 'cancelled'],
   creating_skill: ['testing_skill', 'failed', 'cancelled'],
   testing_skill: ['searching_skills', 'waiting_for_approval', 'failed', 'cancelled'],
   waiting_for_approval: ['searching_skills', 'failed', 'cancelled'],
@@ -115,6 +135,27 @@ export class Orchestrator extends EventEmitter {
     if (!analysis) throw new Error('TASK_ANALYSIS_MISSING');
     await this.execute(id, task.userInput, analysis, 'waiting_for_approval', DEFAULT_BUDGET);
   }
+  async resumeAfterPermission(id: string, scope: 'once' | 'all') {
+    const task = this.db.getTask(id);
+    if (!task || task.state !== 'waiting_for_approval') return;
+    this.event(
+      id,
+      'PERMISSION_GRANTED',
+      'waiting_for_approval',
+      scope === 'all' ? 'Đã ủy quyền cho các tác vụ an toàn.' : 'Đã cấp quyền cho tác vụ này.',
+      { scope },
+    );
+    await this.resume(id);
+  }
+  rejectPermission(id: string) {
+    const task = this.db.getTask(id);
+    if (!task || task.state !== 'waiting_for_approval') return;
+    this.db.updateTask(id, 'failed', {
+      errorCode: 'WORKSPACE_ACCESS_DENIED',
+      errorMessage: 'Người dùng đã từ chối cấp quyền.',
+    });
+    this.event(id, 'PERMISSION_REJECTED', 'failed', 'Đã từ chối cấp quyền. Tác vụ đã dừng.');
+  }
   private async execute(
     id: string,
     input: string,
@@ -143,9 +184,17 @@ export class Orchestrator extends EventEmitter {
             analysis.intent.toLowerCase().includes(value.toLowerCase()),
           ),
       );
-      if (!matches.length) {
+      const missingCapabilities = analysis.requiredCapabilities.filter(
+        (capability) =>
+          !matches.some((skill) =>
+            skill.manifest.capabilities.some(
+              (value) => value.toLowerCase() === capability.toLowerCase(),
+            ),
+          ),
+      );
+      if (missingCapabilities.length) {
         this.event(id, 'SKILL_NOT_FOUND', state, 'Không tìm thấy skill đáp ứng yêu cầu.', {
-          missingCapabilities: analysis.requiredCapabilities,
+          missingCapabilities,
         });
         state = this.move(
           id,
@@ -155,7 +204,7 @@ export class Orchestrator extends EventEmitter {
           'Đang tạo đề xuất skill khai báo.',
         );
         const proposal = createProposal(
-          analysis.requiredCapabilities.length ? analysis.requiredCapabilities : [analysis.intent],
+          missingCapabilities.length ? missingCapabilities : [analysis.intent],
         );
         this.event(
           id,
@@ -196,27 +245,50 @@ export class Orchestrator extends EventEmitter {
           'Skill khai báo an toàn đã được tự động kích hoạt.',
           { skillId: manifest.id, manifest },
         );
-        matches = this.db.listSkills().filter((skill) => skill.id === manifest.id);
+        matches = [...matches, ...this.db.listSkills().filter((skill) => skill.id === manifest.id)];
       }
-      const selected = matches[0]!;
+      const selectedSkills = selectSkillsForCapabilities(matches, analysis.requiredCapabilities);
+      const selected = selectedSkills[0]!;
+      if (selectedSkills.some((skill) => skill.manifest.riskLevel === 'forbidden'))
+        throw new Error('WORKSPACE_ACCESS_DENIED');
+      const permissionSkill = selectedSkills.find((skill) =>
+        requiresUserPermission(skill.manifest),
+      );
+      if (permissionSkill && !this.db.hasPermissionGrant(id)) {
+        const request = this.db.createPermissionRequest(
+          id,
+          permissionSkill.id,
+          permissionSkill.manifest.permissions,
+          `Skill ${permissionSkill.name} cần thêm quyền để thực hiện tác vụ.`,
+        );
+        this.move(
+          id,
+          state,
+          'waiting_for_approval',
+          'PERMISSION_APPROVAL_REQUIRED',
+          'Đang chờ người dùng cấp quyền.',
+          request,
+        );
+        return;
+      }
       const routing = {
         candidates: matches.map((skill, index) => ({
           skillId: skill.id,
           score: 1 - index / 100,
           reasons: ['active capability match'],
         })),
-        selectedSkillIds: [selected.id],
+        selectedSkillIds: selectedSkills.map((skill) => skill.id),
         confidence: 1,
         missingCapabilities: [],
       };
       this.event(id, 'SKILL_SELECTED', state, `Đã chọn skill ${selected.name}.`, {
         ...routing,
         registryCount: active.length + (active.some((skill) => skill.id === selected.id) ? 0 : 1),
-        selectedSkill: {
-          id: selected.id,
-          name: selected.name,
-          runtime: selected.manifest.runtime.type,
-        },
+        selectedSkills: selectedSkills.map((skill) => ({
+          id: skill.id,
+          name: skill.name,
+          runtime: skill.manifest.runtime.type,
+        })),
       });
       state = this.move(
         id,
@@ -225,28 +297,87 @@ export class Orchestrator extends EventEmitter {
         'PLAN_GENERATION_STARTED',
         'Đang xây dựng kế hoạch.',
       );
-      const plan =
-        selected.manifest.runtime.type === 'prompt'
-          ? {
-              goal: analysis.intent,
-              steps: [
-                {
-                  id: 'step-1',
-                  order: 1,
-                  title: selected.name,
-                  description: selected.description,
-                  skillId: selected.id,
-                  input: { request: input },
-                  expectedOutput: 'Structured JSON',
-                  risk: 'low' as const,
-                },
-              ],
-            }
-          : validatePlan(createPlan(analysis, routing), budget.maxSteps);
+      let plan;
+      if (selectedSkills.length > 1) {
+        plan = {
+          goal: analysis.intent,
+          steps: selectedSkills.map((skill, index) => ({
+            id: `step-${index + 1}`,
+            order: index + 1,
+            title: skill.name,
+            description:
+              index === 0
+                ? `Thu thập dữ liệu bằng ${skill.name}`
+                : `Dùng kết quả bước ${index} làm đầu vào cho ${skill.name}`,
+            skillId: skill.id,
+            input:
+              skill.id === 'filesystem-reader'
+                ? { path: inferFilesystemPath(input) }
+                : { request: input, inputFromStep: `step-${index}` },
+            expectedOutput: `Hoàn thành mục tiêu ${analysis.objectives[index] ?? index + 1}`,
+            risk: skill.manifest.riskLevel === 'low' ? ('low' as const) : ('medium' as const),
+          })),
+        };
+      } else if (selected.manifest.runtime.type === 'prompt') {
+        plan = {
+          goal: analysis.intent,
+          steps: [
+            {
+              id: 'step-1',
+              order: 1,
+              title: selected.name,
+              description: selected.description,
+              skillId: selected.id,
+              input: { request: input },
+              expectedOutput: 'Structured JSON',
+              risk: 'low' as const,
+            },
+          ],
+        };
+      } else if (selected.manifest.runtime.type === 'workflow') {
+        const recovery = recoveryWorkflowSchema.parse(selected.manifest.definition);
+        guard.modelCall();
+        const prepared = await this.model.generateStructured({
+          prompt: [
+            `Prepare input for recovery workflow ${selected.name}.`,
+            `Original user request: ${input}`,
+            `Wrapped skill: ${recovery.wrappedSkillId}`,
+            'Return only the input object for the wrapped skill.',
+            'Keep filesystem paths workspace-relative and point to a file when reading content.',
+          ].join('\n'),
+          schema: repairedSkillInputSchema,
+          signal: controller.signal,
+        });
+        plan = validatePlan(
+          {
+            goal: analysis.intent,
+            steps: [
+              {
+                id: 'step-1',
+                order: 1,
+                title: selected.name,
+                description: selected.description,
+                skillId: recovery.wrappedSkillId,
+                input: prepared.input,
+                expectedOutput: 'Structured result from recovered skill',
+                risk:
+                  selected.manifest.riskLevel === 'low' ? ('low' as const) : ('medium' as const),
+              },
+            ],
+          },
+          budget.maxSteps,
+        );
+      } else {
+        plan = validatePlan(createPlan(analysis, routing, input), budget.maxSteps);
+      }
       this.event(id, 'PLAN_GENERATED', state, `Kế hoạch có ${plan.steps.length} bước.`, plan);
       state = this.move(id, state, 'executing', 'EXECUTION_STARTED', 'Bắt đầu thực thi.');
       const results: unknown[] = [];
       for (const step of plan.steps) {
+        const stepSkill =
+          selectedSkills.find((skill) => skill.id === step.skillId) ??
+          this.db.listSkills().find((skill) => skill.id === step.skillId);
+        if (!stepSkill) throw new Error('SKILL_NOT_FOUND');
         guard.step();
         if (controller.signal.aborted) throw new Error('TASK_CANCELLED');
         this.event(
@@ -259,15 +390,27 @@ export class Orchestrator extends EventEmitter {
         let result: unknown;
         for (let attempt = 0; attempt <= budget.maxRetriesPerStep; attempt += 1) {
           try {
-            if (selected.manifest.runtime.type === 'prompt') {
+            if (stepSkill.manifest.runtime.type === 'prompt') {
               guard.modelCall();
+              const upstreamResult = results.at(-1);
               result = await this.model.generateStructured({
                 prompt: [
-                  `Execute the declarative skill "${selected.name}".`,
-                  `Skill purpose: ${selected.description}.`,
-                  `Required capabilities: ${selected.manifest.capabilities.join(', ')}.`,
+                  `Execute the declarative skill "${stepSkill.name}".`,
+                  `Skill purpose: ${stepSkill.description}.`,
+                  `Required capabilities: ${stepSkill.manifest.capabilities.join(', ')}.`,
                   `Original user request: ${input}`,
                   `Current step: ${step.title} — ${step.description}.`,
+                  ...(attempt > 0
+                    ? [
+                        'The previous output was invalid or merely repeated the request. Produce the actual requested result now.',
+                      ]
+                    : []),
+                  ...(upstreamResult === undefined
+                    ? []
+                    : [
+                        `Required upstream result: ${JSON.stringify(upstreamResult)}`,
+                        'Use the upstream content as the source data. Do not translate or repeat the instruction itself.',
+                      ]),
                   'Return the actual final result in the required "output" field.',
                   'For translation, output must contain the translated text, not an explanation.',
                   'For generated files, include their workspace-relative paths in "artifacts".',
@@ -276,6 +419,9 @@ export class Orchestrator extends EventEmitter {
                 schema: skillExecutionResultSchema,
                 signal: controller.signal,
               });
+              const output = (result as { output?: unknown }).output;
+              if (typeof output === 'string' && isRequestEcho(input, output))
+                throw new Error('RESULT_ECHOED_REQUEST');
             } else
               result = await executeSkill(
                 step.skillId,
@@ -291,6 +437,33 @@ export class Orchestrator extends EventEmitter {
               attempt,
               reason: message,
             });
+            if (attempt === 0 && isRecoverableSkillFailure(message)) {
+              try {
+                result = await this.recoverWithGeneratedSkill({
+                  taskId: id,
+                  state,
+                  request: input,
+                  analysis,
+                  failedSkill: stepSkill.manifest,
+                  failedInput: step.input,
+                  reason: message,
+                  signal: controller.signal,
+                  guard,
+                });
+                break;
+              } catch (recoveryReason) {
+                const recoveryMessage =
+                  recoveryReason instanceof Error ? recoveryReason.message : String(recoveryReason);
+                if (!isRecoverableSkillFailure(recoveryMessage)) throw recoveryReason;
+                this.event(
+                  id,
+                  'SKILL_EVALUATION_COMPLETED',
+                  state,
+                  'Skill thay thế chưa xử lý được lỗi; tiếp tục chiến lược dự phòng.',
+                  { passed: false, reason: recoveryMessage },
+                );
+              }
+            }
             if (
               attempt >= budget.maxRetriesPerStep ||
               ['WORKSPACE_ACCESS_DENIED', 'TASK_CANCELLED'].includes(message)
@@ -334,6 +507,75 @@ export class Orchestrator extends EventEmitter {
     } finally {
       this.controllers.delete(id);
     }
+  }
+  private async recoverWithGeneratedSkill(options: {
+    taskId: string;
+    state: AgentState;
+    request: string;
+    analysis: TaskAnalysis;
+    failedSkill: SkillManifest;
+    failedInput: Record<string, unknown>;
+    reason: string;
+    signal: AbortSignal;
+    guard: BudgetGuard;
+  }) {
+    const { taskId, state, request, analysis, failedSkill, failedInput, reason, signal, guard } =
+      options;
+    const recoveryId = `generated-${failedSkill.id}-recovery`.slice(0, 64);
+    this.event(
+      taskId,
+      'SKILL_CREATION_PROPOSAL_GENERATED',
+      state,
+      `Skill ${failedSkill.name} không phù hợp; đang tạo skill thay thế.`,
+      { failedSkillId: failedSkill.id, reason },
+    );
+    guard.modelCall();
+    const repaired = await this.model.generateStructured({
+      prompt: [
+        'Create corrected input for a safe recovery workflow.',
+        `Original user request: ${request}`,
+        `Task intent: ${analysis.intent}`,
+        `Wrapped skill: ${failedSkill.id}`,
+        `Failed input: ${JSON.stringify(failedInput)}`,
+        `Failure: ${reason}`,
+        'Return only an input object accepted by the wrapped skill.',
+        'For filesystem-reader, input.path must identify the requested file, never a directory.',
+        'Keep paths workspace-relative and never request broader permissions.',
+      ].join('\n'),
+      schema: repairedSkillInputSchema,
+      signal,
+    });
+    const manifest: SkillManifest = {
+      ...failedSkill,
+      id: recoveryId,
+      name: `${failedSkill.name} Recovery`,
+      version: '1.0.0',
+      description: `Auto-generated recovery workflow for ${failedSkill.name}`,
+      runtime: { type: 'workflow', timeoutSeconds: failedSkill.runtime.timeoutSeconds },
+      approvalRequired: false,
+      definition: {
+        wrappedSkillId: failedSkill.id,
+        correctedInput: repaired.input,
+        generatedFromError: reason,
+      },
+    };
+    this.db.installSkill(manifest, 'active', 'agent');
+    this.event(
+      taskId,
+      'SKILL_AUTO_INSTALLED',
+      state,
+      `Đã tạo và kích hoạt skill thay thế ${manifest.name}.`,
+      { skillId: manifest.id, manifest, replaces: failedSkill.id },
+    );
+    const result = await executeSkill(failedSkill.id, repaired.input, this.workspace, signal);
+    this.event(
+      taskId,
+      'SKILL_EVALUATION_COMPLETED',
+      state,
+      'Skill thay thế đã tự khắc phục lỗi và hoàn thành tác vụ.',
+      { passed: true, skillId: manifest.id },
+    );
+    return result;
   }
   private move(
     id: string,
@@ -421,13 +663,61 @@ export function normalizeLanguageTask(input: string, analysis: TaskAnalysis): Ta
     value,
   );
   if (!translation && !definition) return analysis;
+  const readsFile = /\bfile\b|tệp|đọc\s+(?:nội dung\s+)?(?:file|tệp)|[\w.-]+\.[a-z0-9]{1,12}/i.test(
+    input,
+  );
+  const languageCapability = translation ? 'language:translate' : 'language:define';
   return {
     ...analysis,
     category: 'general',
     intent: translation ? `Translate: ${input}` : `Define word or phrase: ${input}`,
-    requiredCapabilities: [translation ? 'language:translate' : 'language:define'],
+    requiredCapabilities: [...(readsFile ? ['filesystem:read'] : []), languageCapability],
     estimatedRisk: 'low',
   };
+}
+
+type RoutableSkill = {
+  id: string;
+  name: string;
+  description: string;
+  manifest: SkillManifest;
+};
+
+export function selectSkillsForCapabilities<T extends RoutableSkill>(
+  skills: T[],
+  capabilities: string[],
+) {
+  const selected: T[] = [];
+  for (const capability of capabilities) {
+    const match = skills.find((skill) =>
+      skill.manifest.capabilities.some((value) => value.toLowerCase() === capability.toLowerCase()),
+    );
+    if (match && !selected.some((skill) => skill.id === match.id)) selected.push(match);
+  }
+  if (!selected.length && skills[0]) selected.push(skills[0]);
+  return selected;
+}
+
+export function isRequestEcho(request: string, output: string) {
+  const normalize = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+  const expected = normalize(request);
+  const actual = normalize(output);
+  return actual === expected || (expected.length > 24 && actual.includes(expected));
+}
+
+export function requiresUserPermission(manifest: SkillManifest) {
+  const permissions = manifest.permissions;
+  return (
+    manifest.approvalRequired ||
+    permissions.filesystem.write.length > 0 ||
+    permissions.commands.length > 0 ||
+    permissions.network.enabled ||
+    permissions.environmentVariables.length > 0
+  );
 }
 
 function collectArtifacts(value: unknown): string[] {

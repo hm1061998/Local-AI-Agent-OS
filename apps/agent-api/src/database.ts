@@ -35,6 +35,9 @@ export class AgentDatabase {
     this.db.exec(
       `CREATE TABLE IF NOT EXISTS agent_runs(task_id TEXT PRIMARY KEY,mode TEXT NOT NULL,state TEXT NOT NULL,current_owner TEXT,budget_json TEXT NOT NULL,usage_json TEXT NOT NULL,signals_json TEXT NOT NULL,started_at TEXT NOT NULL,updated_at TEXT NOT NULL,completed_at TEXT);CREATE TABLE IF NOT EXISTS agent_messages(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,correlation_id TEXT NOT NULL,causation_id TEXT,from_role TEXT NOT NULL,to_role TEXT NOT NULL,type TEXT NOT NULL,sequence INTEGER NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(task_id,sequence));CREATE TABLE IF NOT EXISTS agent_assignments(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,role TEXT NOT NULL,status TEXT NOT NULL,summary TEXT,created_at TEXT NOT NULL,completed_at TEXT);CREATE TABLE IF NOT EXISTS system_settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL);`,
     );
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS task_permission_requests(id TEXT PRIMARY KEY,task_id TEXT NOT NULL UNIQUE,skill_id TEXT NOT NULL,permissions_json TEXT NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,scope TEXT,created_at TEXT NOT NULL,decided_at TEXT);`,
+    );
   }
   private addColumn(table: string, column: string, definition: string) {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -309,6 +312,65 @@ export class AgentDatabase {
     this.db
       .prepare('INSERT OR REPLACE INTO system_settings(key,value_json,updated_at) VALUES(?,?,?)')
       .run(key, JSON.stringify(value), new Date().toISOString());
+  }
+  createPermissionRequest(taskId: string, skillId: string, permissions: unknown, reason: string) {
+    const existing = this.permissionRequest(taskId);
+    if (existing) return existing;
+    const request = {
+      id: crypto.randomUUID(),
+      taskId,
+      skillId,
+      permissions,
+      reason,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare(
+        'INSERT INTO task_permission_requests(id,task_id,skill_id,permissions_json,reason,status,created_at) VALUES(?,?,?,?,?,?,?)',
+      )
+      .run(
+        request.id,
+        taskId,
+        skillId,
+        JSON.stringify(permissions),
+        reason,
+        request.status,
+        request.createdAt,
+      );
+    this.audit('PERMISSION_APPROVAL_REQUIRED', 'task', taskId, request);
+    return request;
+  }
+  permissionRequest(taskId: string) {
+    const row = this.db
+      .prepare(
+        'SELECT id,task_id taskId,skill_id skillId,permissions_json permissions,reason,status,scope,created_at createdAt,decided_at decidedAt FROM task_permission_requests WHERE task_id=?',
+      )
+      .get(taskId) as any;
+    return row ? { ...row, permissions: JSON.parse(row.permissions) } : undefined;
+  }
+  decidePermission(id: string, status: 'approved' | 'rejected', scope: 'once' | 'all') {
+    this.db
+      .prepare('UPDATE task_permission_requests SET status=?,scope=?,decided_at=? WHERE id=?')
+      .run(status, scope, new Date().toISOString(), id);
+    const row = this.db
+      .prepare('SELECT task_id taskId FROM task_permission_requests WHERE id=?')
+      .get(id) as { taskId: string } | undefined;
+    if (scope === 'all' && status === 'approved') this.setSetting('authorizeAllPermissions', true);
+    if (row)
+      this.audit(
+        status === 'approved' ? 'PERMISSION_GRANTED' : 'PERMISSION_REJECTED',
+        'task',
+        row.taskId,
+        { requestId: id, scope },
+      );
+    return row ? this.permissionRequest(row.taskId) : undefined;
+  }
+  hasPermissionGrant(taskId: string) {
+    return (
+      this.setting<boolean>('authorizeAllPermissions', false) ||
+      this.permissionRequest(taskId)?.status === 'approved'
+    );
   }
   createAgentRun(taskId: string, mode: string, state: string, budget: unknown, signals: unknown) {
     const now = new Date().toISOString();

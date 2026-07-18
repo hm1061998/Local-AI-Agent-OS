@@ -74,6 +74,8 @@ describe('universe state', () => {
   });
   it('uses stable radial layout', () =>
     expect(radialPosition(1, 10)).toEqual(radialPosition(1, 10)));
+  it('places skill nodes on a spherical shell', () =>
+    expect(Math.hypot(...radialPosition(4, 12, 6))).toBeCloseTo(6, 5));
   it('maps skill edges', () =>
     expect(
       graphFromSkills([
