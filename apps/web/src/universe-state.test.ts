@@ -5,6 +5,7 @@ import {
   radialPosition,
   reduceUniverse,
   replayReducer,
+  resetUniverseExecution,
   validateWorkflowDraft,
 } from './universe-state';
 import { mergePersistedEvents } from './Universe';
@@ -34,6 +35,38 @@ describe('universe state', () => {
     const once = mergePersistedEvents(initial, [event]);
     const twice = mergePersistedEvents(once, [event]);
     expect(twice.events).toHaveLength(1);
+  });
+  it('sorts late persisted events back into sequence order', () => {
+    const base = graphFromSkills([]);
+    const makeEvent = (id: string, sequence: number) => ({
+      id,
+      taskId: 'task-1',
+      type: 'TASK_ANALYSIS_STARTED' as const,
+      state: 'analyzing_task' as const,
+      message: id,
+      timestamp: new Date().toISOString(),
+      sequence,
+    });
+    const late = mergePersistedEvents(base, [makeEvent('event-15', 15)]);
+    const hydrated = mergePersistedEvents(late, [makeEvent('event-3', 3)]);
+    expect(hydrated.events.map((item) => item.sequence)).toEqual([3, 15]);
+  });
+  it('resets task execution state while preserving the skill constellation', () => {
+    let state = graphFromSkills([
+      {
+        id: 'skill-a',
+        name: 'Skill A',
+        status: 'active',
+        manifest: { runtime: { type: 'prompt' }, riskLevel: 'low' },
+      },
+    ]);
+    state = reduceUniverse(state, event('TASK_RECEIVED'));
+    state.nodes = state.nodes.map((node) => ({ ...node, active: true, visualState: 'success' }));
+    const reset = resetUniverseExecution(state);
+    expect(reset.events).toHaveLength(0);
+    expect(reset.nodes.some((node) => node.kind === 'task')).toBe(false);
+    expect(reset.nodes.find((node) => node.id === 'skill-a')?.active).toBe(false);
+    expect(reset.nodes.find((node) => node.id === 'skill-a')?.visualState).toBeUndefined();
   });
   it('clamps node size', () => {
     expect(clampNodeSize(0)).toBe(0.55);

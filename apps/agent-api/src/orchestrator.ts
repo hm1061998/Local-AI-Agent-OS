@@ -83,7 +83,7 @@ export class Orchestrator extends EventEmitter {
     this.controllers.set(id, controller);
     let state: AgentState = 'idle';
     try {
-      this.event(id, 'TASK_RECEIVED', state, 'Đã nhận tác vụ.');
+      this.event(id, 'TASK_RECEIVED', state, 'Đã nhận tác vụ.', { input });
       state = this.move(
         id,
         state,
@@ -311,7 +311,7 @@ export class Orchestrator extends EventEmitter {
           }
         }
         results.push(result);
-        this.event(id, 'STEP_COMPLETED', state, `Đã hoàn thành bước ${step.order}.`, {
+        this.event(id, 'STEP_COMPLETED', state, `Bước ${step.order} đã xong.`, {
           step,
           result,
           artifacts: collectArtifacts(result),
@@ -324,8 +324,10 @@ export class Orchestrator extends EventEmitter {
         'RESULT_VALIDATION_STARTED',
         'Đang kiểm tra kết quả.',
       );
-      this.event(id, 'RESULT_VALIDATION_COMPLETED', state, 'Kết quả hợp lệ.', { results });
-      state = this.move(id, state, 'completed', 'TASK_COMPLETED', 'Hoàn thành.', { results });
+      this.event(id, 'RESULT_VALIDATION_COMPLETED', state, 'Đã kiểm tra kết quả.', { results });
+      state = this.move(id, state, 'completed', 'TASK_COMPLETED', 'Đã hoàn tất yêu cầu.', {
+        results,
+      });
       this.db.updateTask(id, state, { resultSummary: JSON.stringify(results) });
     } catch (error) {
       this.fail(id, state, controller, error);
@@ -371,11 +373,12 @@ export class Orchestrator extends EventEmitter {
     for (let attempt = 0; attempt < 2; attempt++) {
       if (signal.aborted) throw new Error('TASK_CANCELLED');
       try {
-        return await this.model.generateStructured({
+        const analysis = await this.model.generateStructured({
           prompt: `Analyze this task: ${input}. Fields: title, intent, category (filesystem|code_analysis|testing|reporting|general), objectives, requiredCapabilities, constraints, estimatedRisk (low|medium|high).`,
           schema: taskAnalysisSchema,
           signal,
         });
+        return normalizeLanguageTask(input, analysis);
       } catch (error) {
         if (signal.aborted) throw new Error('TASK_CANCELLED');
         if (error instanceof ModelProviderError) throw error;
@@ -409,6 +412,22 @@ export class Orchestrator extends EventEmitter {
     this.db.addEvent(event);
     this.emit('event', event);
   }
+}
+
+export function normalizeLanguageTask(input: string, analysis: TaskAnalysis): TaskAnalysis {
+  const value = input.toLowerCase();
+  const translation = /\btranslate\b|\bdịch\b|dịch\s+(?:từ|câu|đoạn)/i.test(value);
+  const definition = /\bmeaning\b|\bdefine\b|\bdefinition\b|nghĩa\s+(?:của|là)|định nghĩa/i.test(
+    value,
+  );
+  if (!translation && !definition) return analysis;
+  return {
+    ...analysis,
+    category: 'general',
+    intent: translation ? `Translate: ${input}` : `Define word or phrase: ${input}`,
+    requiredCapabilities: [translation ? 'language:translate' : 'language:define'],
+    estimatedRisk: 'low',
+  };
 }
 
 function collectArtifacts(value: unknown): string[] {

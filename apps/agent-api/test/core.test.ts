@@ -9,7 +9,12 @@ import {
   parseStructuredJson,
 } from '@local-agent/model-provider';
 import { AgentDatabase } from '../src/database';
-import { BudgetGuard, Orchestrator, assertTransition } from '../src/orchestrator';
+import {
+  BudgetGuard,
+  Orchestrator,
+  assertTransition,
+  normalizeLanguageTask,
+} from '../src/orchestrator';
 import {
   allowedCommands,
   assertAllowedCommand,
@@ -28,6 +33,18 @@ const analysis = taskAnalysisSchema.parse({
   requiredCapabilities: ['filesystem:read'],
   constraints: [],
   estimatedRisk: 'low',
+});
+
+describe('language task normalization', () => {
+  it('routes word meanings away from code analysis', () => {
+    const normalized = normalizeLanguageTask('ý nghĩa của "good" là gì', {
+      ...analysis,
+      category: 'code_analysis',
+      requiredCapabilities: ['code:analyze'],
+    });
+    expect(normalized.category).toBe('general');
+    expect(normalized.requiredCapabilities).toEqual(['language:define']);
+  });
 });
 
 describe('schemas', () => {

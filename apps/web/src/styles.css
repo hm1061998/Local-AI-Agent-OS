@@ -331,6 +331,31 @@ select {
   background: #030914f5;
   border-bottom: 1px solid #12283a;
 }
+.task-context {
+  margin: 10px 0 8px;
+  padding: 9px 10px;
+  border-left: 2px solid #55ffc5;
+  border-radius: 0 7px 7px 0;
+  background: #0a1b21;
+}
+.task-context span {
+  display: block;
+  margin-bottom: 4px;
+  color: #5f8792;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+.task-context p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: #e0f7f3;
+  font:
+    600 12px/1.45 Inter,
+    sans-serif;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
 .live-dot {
   color: #607484;
 }

@@ -196,6 +196,16 @@ export function reduceUniverse(state: UniverseState, event: AgentEvent): Univers
     ...(currentTaskId ? { currentTaskId } : {}),
   };
 }
+export function resetUniverseExecution(state: UniverseState): UniverseState {
+  const nodes = state.nodes
+    .filter((node) => node.kind !== 'task' && node.kind !== 'sandbox')
+    .map(({ visualState: _visualState, ...node }) => ({ ...node, active: false }));
+  return {
+    nodes,
+    edges: state.edges.filter((edge) => edge.type !== 'active_execution'),
+    events: [],
+  };
+}
 export interface ReplayState {
   index: number;
   playing: boolean;

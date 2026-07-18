@@ -9,6 +9,7 @@ import {
   graphFromSkills,
   prefersReducedMotion,
   reduceUniverse,
+  resetUniverseExecution,
   supportsWebGL,
   type SkillGraphNode,
   type UniverseState,
@@ -268,7 +269,7 @@ function FriendlyOutput({ value }: { value: unknown }) {
         (key) => typeof object[key] === 'string' && String(object[key]).trim(),
       )
     : undefined;
-  const primary = preferredKey ? object?.[preferredKey] : value;
+  const primary = preferredKey ? object?.[preferredKey] : object ? undefined : value;
   const metadata = object
     ? Object.entries(object).filter(([key]) => key !== preferredKey && key !== 'artifacts')
     : [];
@@ -299,9 +300,9 @@ function FriendlyOutput({ value }: { value: unknown }) {
             <li key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>
           ))}
         </ul>
-      ) : (
+      ) : primary !== undefined ? (
         <div className="result-text">{String(primary ?? '')}</div>
-      )}
+      ) : null}
       {metadata.length > 0 && (
         <dl className="result-metadata">
           {metadata.map(([key, item]) => (
@@ -368,7 +369,13 @@ function AgentComposer({
 }
 export function mergePersistedEvents(current: UniverseState, events: AgentEvent[]) {
   const known = new Set(current.events.map((event) => event.id));
-  return events.filter((event) => !known.has(event.id)).reduce(reduceUniverse, current);
+  const merged = events.filter((event) => !known.has(event.id)).reduce(reduceUniverse, current);
+  return {
+    ...merged,
+    events: [...merged.events].sort(
+      (left, right) => left.taskId.localeCompare(right.taskId) || left.sequence - right.sequence,
+    ),
+  };
 }
 export function Universe() {
   const [skills, setSkills] = useState<any[]>([]),
@@ -379,6 +386,7 @@ export function Universe() {
     [force2D, setForce2D] = useState(false),
     [telemetry, setTelemetry] = useState<any>(),
     [activeTaskId, setActiveTaskId] = useState<string>(),
+    [currentRequest, setCurrentRequest] = useState(''),
     [output, setOutput] = useState<unknown>(),
     [running, setRunning] = useState(false),
     [paused, setPaused] = useState(false),
@@ -434,6 +442,9 @@ export function Universe() {
         const events = await api.events(activeTaskId);
         if (disposed) return;
         setGraph((current) => mergePersistedEvents(current, events));
+        const received = events.find((event) => event.type === 'TASK_RECEIVED');
+        const persistedInput = (received?.payload as any)?.input;
+        if (typeof persistedInput === 'string') setCurrentRequest(persistedInput);
         const latestOutput = events
           .filter(
             (event) =>
@@ -476,6 +487,9 @@ export function Universe() {
       setError('');
       setOutput(undefined);
       setRunning(true);
+      setCurrentRequest(request);
+      setActiveTaskId(undefined);
+      setGraph((current) => resetUniverseExecution(current));
       const task = await api.create(request);
       setActiveTaskId(task.id);
       setGraph((current) => ({ ...current, currentTaskId: task.id }));
@@ -576,8 +590,14 @@ export function Universe() {
                 {running ? 'LIVE' : 'IDLE'}
               </span>
             </div>
+            {currentRequest && (
+              <div className="task-context" title={currentRequest}>
+                <span>YÊU CẦU ĐANG THỰC HIỆN</span>
+                <p>{currentRequest}</p>
+              </div>
+            )}
             <ol className="console-log">
-              {graph.events.slice(-50).map((event) => (
+              {taskEvents.slice(-50).map((event) => (
                 <li key={event.id} className={traceTone(event)}>
                   <time>{String(event.sequence).padStart(2, '0')}</time>
                   <span>
