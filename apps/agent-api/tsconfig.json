@@ -1,1 +1,12 @@
-{"extends":"../../tsconfig.base.json","compilerOptions":{"outDir":"../../dist/apps/agent-api","module":"CommonJS","moduleResolution":"Node","experimentalDecorators":true,"emitDecoratorMetadata":true,"types":["node"]},"include":["src/**/*.ts"]}
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "../../dist/apps/agent-api",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

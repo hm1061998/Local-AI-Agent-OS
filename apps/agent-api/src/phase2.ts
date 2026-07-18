@@ -1,9 +1,132 @@
-import type {SkillManifest,SkillRecord,SkillCreationProposal,WorkflowSkillDefinition} from '@local-agent/skill-schema';
-export function cosineSimilarity(a:number[],b:number[]){if(!a.length||a.length!==b.length)return 0;const dot=a.reduce((s,v,i)=>s+v*(b[i]??0),0),ma=Math.sqrt(a.reduce((s,v)=>s+v*v,0)),mb=Math.sqrt(b.reduce((s,v)=>s+v*v,0));return ma&&mb?dot/(ma*mb):0}
-export interface RankingContext{queryEmbedding?:number[]|undefined;terms:string[];input:Record<string,unknown>;preferredSkillIds?:string[]|undefined}
-export class DefaultSkillRankingStrategy{rank(skills:SkillRecord[],context:RankingContext){return skills.map(skill=>{const semantic=context.queryEmbedding&&skill.embedding?cosineSimilarity(context.queryEmbedding,skill.embedding):0;const trigger=skill.manifest.triggers.filter(t=>context.terms.includes(t.toLowerCase())).length/Math.max(1,skill.manifest.triggers.length);const history=skill.successRate;const required=(skill.manifest.inputSchema.required as string[]|undefined)??[];const compatibility=required.every(k=>k in context.input)?1:0;const preference=context.preferredSkillIds?.includes(skill.id)?1:0;const score=semantic*.5+trigger*.2+history*.15+compatibility*.1+preference*.05;return{skillId:skill.id,score,reasons:[`semantic ${semantic.toFixed(2)}`,`trigger ${trigger.toFixed(2)}`,`success ${history.toFixed(2)}`,`input ${compatibility.toFixed(2)}`]}}).sort((a,b)=>b.score-a.score)}}
-export function validateWorkflow(def:WorkflowSkillDefinition,activeIds:Set<string>){if(def.steps.length>10)throw new Error('WORKFLOW_TOO_LARGE');const ids=new Set(def.steps.map(s=>s.id));for(const s of def.steps){if(!activeIds.has(s.skillId))throw new Error('SKILL_NOT_ACTIVE');if(s.dependsOn.some(d=>!ids.has(d)))throw new Error('MAPPING_INVALID')}const visiting=new Set<string>(),done=new Set<string>();const visit=(id:string)=>{if(visiting.has(id))throw new Error('CIRCULAR_DEPENDENCY');if(done.has(id))return;visiting.add(id);def.steps.find(s=>s.id===id)?.dependsOn.forEach(visit);visiting.delete(id);done.add(id)};ids.forEach(visit);return def}
-export function aggregatePermissions(manifests:SkillManifest[]):SkillManifest['permissions']{const unique=(v:string[])=>[...new Set(v)];return{filesystem:{read:unique(manifests.flatMap(m=>m.permissions.filesystem.read)),write:unique(manifests.flatMap(m=>m.permissions.filesystem.write)),delete:[]},commands:unique(manifests.flatMap(m=>m.permissions.commands)),network:{enabled:manifests.some(m=>m.permissions.network.enabled),allowedHosts:unique(manifests.flatMap(m=>m.permissions.network.allowedHosts))},environmentVariables:unique(manifests.flatMap(m=>m.permissions.environmentVariables))}}
-export function assertSafeArchivePaths(paths:string[]){for(const p of paths){const n=p.replace(/\\/g,'/');if(n.startsWith('/')||/^[A-Za-z]:/.test(n)||n.split('/').includes('..'))throw new Error('IMPORT_PATH_TRAVERSAL')}return true}
-export function nextVersion(version:string){const [a,b,c]=version.split('.').map(Number);return`${a}.${b}.${(c??0)+1}`}
-export function createProposal(missing:string[],runtimeType:'prompt'|'workflow'='prompt'):SkillCreationProposal{const slug=(missing[0]??'skill').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,48)||'skill';return{name:`generated-${slug}`,description:`Declarative skill for ${missing.join(', ')}`,runtimeType,reason:'No active skill met the routing confidence threshold.',missingCapabilities:missing,permissions:{filesystem:{read:[],write:[],delete:[]},commands:[],network:{enabled:false,allowedHosts:[]},environmentVariables:[]},riskLevel:'low',testCases:[{name:'returns structured output',input:{sample:true},expectedAssertions:['output matches schema']}]}}
+import type {
+  SkillManifest,
+  SkillRecord,
+  SkillCreationProposal,
+  WorkflowSkillDefinition,
+} from '@local-agent/skill-schema';
+export function cosineSimilarity(a: number[], b: number[]) {
+  if (!a.length || a.length !== b.length) return 0;
+  const dot = a.reduce((s, v, i) => s + v * (b[i] ?? 0), 0),
+    ma = Math.sqrt(a.reduce((s, v) => s + v * v, 0)),
+    mb = Math.sqrt(b.reduce((s, v) => s + v * v, 0));
+  return ma && mb ? dot / (ma * mb) : 0;
+}
+export interface RankingContext {
+  queryEmbedding?: number[] | undefined;
+  terms: string[];
+  input: Record<string, unknown>;
+  preferredSkillIds?: string[] | undefined;
+}
+export class DefaultSkillRankingStrategy {
+  rank(skills: SkillRecord[], context: RankingContext) {
+    return skills
+      .map((skill) => {
+        const semantic =
+          context.queryEmbedding && skill.embedding
+            ? cosineSimilarity(context.queryEmbedding, skill.embedding)
+            : 0;
+        const trigger =
+          skill.manifest.triggers.filter((t) => context.terms.includes(t.toLowerCase())).length /
+          Math.max(1, skill.manifest.triggers.length);
+        const history = skill.successRate;
+        const required = (skill.manifest.inputSchema.required as string[] | undefined) ?? [];
+        const compatibility = required.every((k) => k in context.input) ? 1 : 0;
+        const preference = context.preferredSkillIds?.includes(skill.id) ? 1 : 0;
+        const score =
+          semantic * 0.5 + trigger * 0.2 + history * 0.15 + compatibility * 0.1 + preference * 0.05;
+        return {
+          skillId: skill.id,
+          score,
+          reasons: [
+            `semantic ${semantic.toFixed(2)}`,
+            `trigger ${trigger.toFixed(2)}`,
+            `success ${history.toFixed(2)}`,
+            `input ${compatibility.toFixed(2)}`,
+          ],
+        };
+      })
+      .sort((a, b) => b.score - a.score);
+  }
+}
+export function validateWorkflow(def: WorkflowSkillDefinition, activeIds: Set<string>) {
+  if (def.steps.length > 10) throw new Error('WORKFLOW_TOO_LARGE');
+  const ids = new Set(def.steps.map((s) => s.id));
+  for (const s of def.steps) {
+    if (!activeIds.has(s.skillId)) throw new Error('SKILL_NOT_ACTIVE');
+    if (s.dependsOn.some((d) => !ids.has(d))) throw new Error('MAPPING_INVALID');
+  }
+  const visiting = new Set<string>(),
+    done = new Set<string>();
+  const visit = (id: string) => {
+    if (visiting.has(id)) throw new Error('CIRCULAR_DEPENDENCY');
+    if (done.has(id)) return;
+    visiting.add(id);
+    def.steps.find((s) => s.id === id)?.dependsOn.forEach(visit);
+    visiting.delete(id);
+    done.add(id);
+  };
+  ids.forEach(visit);
+  return def;
+}
+export function aggregatePermissions(manifests: SkillManifest[]): SkillManifest['permissions'] {
+  const unique = (v: string[]) => [...new Set(v)];
+  return {
+    filesystem: {
+      read: unique(manifests.flatMap((m) => m.permissions.filesystem.read)),
+      write: unique(manifests.flatMap((m) => m.permissions.filesystem.write)),
+      delete: [],
+    },
+    commands: unique(manifests.flatMap((m) => m.permissions.commands)),
+    network: {
+      enabled: manifests.some((m) => m.permissions.network.enabled),
+      allowedHosts: unique(manifests.flatMap((m) => m.permissions.network.allowedHosts)),
+    },
+    environmentVariables: unique(manifests.flatMap((m) => m.permissions.environmentVariables)),
+  };
+}
+export function assertSafeArchivePaths(paths: string[]) {
+  for (const p of paths) {
+    const n = p.replace(/\\/g, '/');
+    if (n.startsWith('/') || /^[A-Za-z]:/.test(n) || n.split('/').includes('..'))
+      throw new Error('IMPORT_PATH_TRAVERSAL');
+  }
+  return true;
+}
+export function nextVersion(version: string) {
+  const [a, b, c] = version.split('.').map(Number);
+  return `${a}.${b}.${(c ?? 0) + 1}`;
+}
+export function createProposal(
+  missing: string[],
+  runtimeType: 'prompt' | 'workflow' = 'prompt',
+): SkillCreationProposal {
+  const slug =
+    (missing[0] ?? 'skill')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 48) || 'skill';
+  return {
+    name: `generated-${slug}`,
+    description: `Declarative skill for ${missing.join(', ')}`,
+    runtimeType,
+    reason: 'No active skill met the routing confidence threshold.',
+    missingCapabilities: missing,
+    permissions: {
+      filesystem: { read: [], write: [], delete: [] },
+      commands: [],
+      network: { enabled: false, allowedHosts: [] },
+      environmentVariables: [],
+    },
+    riskLevel: 'low',
+    testCases: [
+      {
+        name: 'returns structured output',
+        input: { sample: true },
+        expectedAssertions: ['output matches schema'],
+      },
+    ],
+  };
+}

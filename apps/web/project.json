@@ -3,11 +3,30 @@
   "sourceRoot": "apps/web/src",
   "projectType": "application",
   "targets": {
-    "dev": { "executor": "nx:run-commands", "options": { "command": "vite --config apps/web/vite.config.ts" } },
-    "build": { "executor": "nx:run-commands", "outputs": ["{workspaceRoot}/dist/apps/web"], "options": { "command": "vite build --config apps/web/vite.config.ts" } },
-    "typecheck": { "executor": "nx:run-commands", "options": { "command": "tsc -p apps/web/tsconfig.json --noEmit" } },
-    "lint": { "executor": "nx:run-commands", "options": { "command": "eslint apps/web/src apps/web/e2e" } },
-    "test": { "executor": "nx:run-commands", "options": { "command": "vitest run --config apps/web/vitest.config.ts" } },
-    "e2e": { "executor": "nx:run-commands", "options": { "command": "playwright test --config apps/web/playwright.config.ts" } }
+    "dev": {
+      "executor": "nx:run-commands",
+      "options": { "command": "vite --config apps/web/vite.config.ts" }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/apps/web"],
+      "options": { "command": "vite build --config apps/web/vite.config.ts" }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsc -p apps/web/tsconfig.json --noEmit" }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": { "command": "eslint apps/web/src apps/web/e2e" }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": { "command": "vitest run --config apps/web/vitest.config.ts" }
+    },
+    "e2e": {
+      "executor": "nx:run-commands",
+      "options": { "command": "playwright test --config apps/web/playwright.config.ts" }
+    }
   }
 }

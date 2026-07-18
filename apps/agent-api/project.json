@@ -1,1 +1,30 @@
-{"name":"agent-api","sourceRoot":"apps/agent-api/src","projectType":"application","targets":{"dev":{"executor":"nx:run-commands","options":{"command":"tsx watch --tsconfig apps/agent-api/tsconfig.json apps/agent-api/src/main.ts"}},"build":{"executor":"nx:run-commands","outputs":["{workspaceRoot}/dist/apps/agent-api"],"options":{"command":"tsc -p apps/agent-api/tsconfig.json"}},"typecheck":{"executor":"nx:run-commands","options":{"command":"tsc -p apps/agent-api/tsconfig.json --noEmit"}},"lint":{"executor":"nx:run-commands","options":{"command":"eslint apps/agent-api/src apps/agent-api/test"}},"test":{"executor":"nx:run-commands","options":{"command":"vitest run --config apps/agent-api/vitest.config.ts"}}}}
+{
+  "name": "agent-api",
+  "sourceRoot": "apps/agent-api/src",
+  "projectType": "application",
+  "targets": {
+    "dev": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx watch --tsconfig apps/agent-api/tsconfig.json apps/agent-api/src/main.ts"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/apps/agent-api"],
+      "options": { "command": "tsc -p apps/agent-api/tsconfig.json" }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsc -p apps/agent-api/tsconfig.json --noEmit" }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": { "command": "eslint apps/agent-api/src apps/agent-api/test" }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": { "command": "vitest run --config apps/agent-api/vitest.config.ts" }
+    }
+  }
+}

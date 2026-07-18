@@ -1,9 +1,180 @@
-import {readdir,readFile,stat,writeFile,mkdir} from 'node:fs/promises'; import {resolve,relative,isAbsolute,sep,extname} from 'node:path'; import {spawn} from 'node:child_process'; import type {ExecutionPlan,SkillManifest,SkillRoutingResult,TaskAnalysis} from '@local-agent/agent-protocol';
-const base=(id:string,name:string,tags:string[],capabilities:string[],write=false,commands:string[]=[]):SkillManifest=>({id,name,version:'1.0.0',description:name,tags,triggers:tags,runtime:{type:'typescript',timeoutSeconds:30},inputSchema:{type:'object'},outputSchema:{type:'object'},permissions:{filesystem:{read:['**/*'],write:write?['.local-agent/output/*']:[],delete:[]},commands,network:{enabled:false,allowedHosts:[]},environmentVariables:[]},riskLevel:commands.length?'medium':'low',approvalRequired:false,capabilities});
-export const manifests=[base('filesystem-reader','Filesystem Reader',['read','file'],['filesystem:read']),base('filesystem-search','Filesystem Search',['search','find'],['filesystem:search']),base('code-analyzer','Code Analyzer',['code','analyze'],['code:analyze']),base('unit-test-generator','Unit Test Generator',['test','generate'],['testing:generate'],true),base('test-runner','Test Runner',['test','run'],['testing:run'],false,['yarn test','npm test','npx vitest run','npx jest --runInBand']),base('markdown-report','Markdown Report',['report','markdown'],['reporting'],true)];
-export function safePath(workspace:string,input:string){const root=resolve(workspace);const target=resolve(root,input);if(target!==root&&!target.startsWith(root+sep))throw new Error('WORKSPACE_ACCESS_DENIED');return target}
-export const allowedCommands=new Set(['yarn test','npm test','npx vitest run','npx jest --runInBand']); export function assertAllowedCommand(command:string){if(!allowedCommands.has(command))throw new Error('WORKSPACE_ACCESS_DENIED');return command.split(' ')}
-export function routeSkills(analysis:TaskAnalysis):SkillRoutingResult{const terms=new Set([...analysis.requiredCapabilities,analysis.category,...analysis.intent.toLowerCase().split(/\W+/)]);const candidates=manifests.map(s=>{const reasons:string[]=[];let score=0;for(const c of s.capabilities)if(terms.has(c)){score+=5;reasons.push(`capability: ${c}`)}for(const tag of s.tags)if(terms.has(tag)){score+=2;reasons.push(`tag: ${tag}`)}return{skillId:s.id,score,reasons}}).filter(c=>c.score>0).sort((a,b)=>b.score-a.score);const selectedSkillIds=candidates.slice(0,3).map(c=>c.skillId);const covered=new Set(selectedSkillIds.flatMap(id=>manifests.find(s=>s.id===id)?.capabilities??[]));const missingCapabilities=analysis.requiredCapabilities.filter(c=>!covered.has(c));return{candidates,selectedSkillIds,confidence:candidates[0]?Math.min(1,candidates[0].score/7):0,missingCapabilities}}
-export function createPlan(analysis:TaskAnalysis,routing:SkillRoutingResult):ExecutionPlan{const selected=routing.selectedSkillIds.length?routing.selectedSkillIds.slice(0,1):['markdown-report'];return{goal:analysis.intent,steps:selected.map((skillId,index)=>({id:`step-${index+1}`,order:index+1,title:`Thực thi ${skillId}`,description:`Dùng ${skillId} để đáp ứng tác vụ`,skillId,input:{path:'.'},expectedOutput:'Kết quả có cấu trúc',risk:manifests.find(s=>s.id===skillId)?.riskLevel==='medium'?'medium':'low'}))}}
-export function validatePlan(plan:ExecutionPlan,maxSteps:number){if(plan.steps.length>maxSteps)throw new Error('BUDGET_EXCEEDED');const ids=new Set(manifests.map(s=>s.id));const orders=new Set<number>();for(const step of plan.steps){if(!ids.has(step.skillId)||orders.has(step.order))throw new Error('PLAN_INVALID');orders.add(step.order)}return plan}
-export async function executeSkill(id:string,input:Record<string,unknown>,workspace:string,signal:AbortSignal){if(signal.aborted)throw new Error('TASK_CANCELLED');const path=String(input.path??'.');if(id==='filesystem-reader')return{content:await readFile(safePath(workspace,path),'utf8')};if(id==='filesystem-search'){const entries=await readdir(safePath(workspace,path));return{entries}}if(id==='code-analyzer'){const target=safePath(workspace,path);const info=await stat(target);return{path:relative(workspace,target),kind:info.isDirectory()?'directory':'file',extension:extname(target)}}if(id==='markdown-report'||id==='unit-test-generator'){const dir=safePath(workspace,'.local-agent/output');await mkdir(dir,{recursive:true});const file=resolve(dir,`${id}-${Date.now()}.md`);await writeFile(file,`# ${id}\n\nGenerated safely by Local Agent OS.\n`);return{file:relative(workspace,file)}}if(id==='test-runner'){const command=String(input.command??'yarn test');const [bin,...args]=assertAllowedCommand(command);return new Promise((resolvePromise,reject)=>{const child=spawn(bin!,args,{cwd:workspace,shell:false,signal});let stdout='',stderr='';child.stdout.on('data',d=>stdout+=String(d));child.stderr.on('data',d=>stderr+=String(d));child.on('close',code=>resolvePromise({code,stdout,stderr}));child.on('error',reject)})}throw new Error('SKILL_NOT_FOUND')}
+import { readdir, readFile, stat, writeFile, mkdir } from 'node:fs/promises';
+import { resolve, relative, isAbsolute, sep, extname } from 'node:path';
+import { spawn } from 'node:child_process';
+import type {
+  ExecutionPlan,
+  SkillManifest,
+  SkillRoutingResult,
+  TaskAnalysis,
+} from '@local-agent/agent-protocol';
+const base = (
+  id: string,
+  name: string,
+  tags: string[],
+  capabilities: string[],
+  write = false,
+  commands: string[] = [],
+): SkillManifest => ({
+  id,
+  name,
+  version: '1.0.0',
+  description: name,
+  tags,
+  triggers: tags,
+  runtime: { type: 'typescript', timeoutSeconds: 30 },
+  inputSchema: { type: 'object' },
+  outputSchema: { type: 'object' },
+  permissions: {
+    filesystem: { read: ['**/*'], write: write ? ['.local-agent/output/*'] : [], delete: [] },
+    commands,
+    network: { enabled: false, allowedHosts: [] },
+    environmentVariables: [],
+  },
+  riskLevel: commands.length ? 'medium' : 'low',
+  approvalRequired: false,
+  capabilities,
+});
+export const manifests = [
+  base('filesystem-reader', 'Filesystem Reader', ['read', 'file'], ['filesystem:read']),
+  base('filesystem-search', 'Filesystem Search', ['search', 'find'], ['filesystem:search']),
+  base('code-analyzer', 'Code Analyzer', ['code', 'analyze'], ['code:analyze']),
+  base(
+    'unit-test-generator',
+    'Unit Test Generator',
+    ['test', 'generate'],
+    ['testing:generate'],
+    true,
+  ),
+  base('test-runner', 'Test Runner', ['test', 'run'], ['testing:run'], false, [
+    'yarn test',
+    'npm test',
+    'npx vitest run',
+    'npx jest --runInBand',
+  ]),
+  base('markdown-report', 'Markdown Report', ['report', 'markdown'], ['reporting'], true),
+];
+export function safePath(workspace: string, input: string) {
+  const root = resolve(workspace);
+  const target = resolve(root, input);
+  if (target !== root && !target.startsWith(root + sep)) throw new Error('WORKSPACE_ACCESS_DENIED');
+  return target;
+}
+export const allowedCommands = new Set([
+  'yarn test',
+  'npm test',
+  'npx vitest run',
+  'npx jest --runInBand',
+]);
+export function assertAllowedCommand(command: string) {
+  if (!allowedCommands.has(command)) throw new Error('WORKSPACE_ACCESS_DENIED');
+  return command.split(' ');
+}
+export function routeSkills(analysis: TaskAnalysis): SkillRoutingResult {
+  const terms = new Set([
+    ...analysis.requiredCapabilities,
+    analysis.category,
+    ...analysis.intent.toLowerCase().split(/\W+/),
+  ]);
+  const candidates = manifests
+    .map((s) => {
+      const reasons: string[] = [];
+      let score = 0;
+      for (const c of s.capabilities)
+        if (terms.has(c)) {
+          score += 5;
+          reasons.push(`capability: ${c}`);
+        }
+      for (const tag of s.tags)
+        if (terms.has(tag)) {
+          score += 2;
+          reasons.push(`tag: ${tag}`);
+        }
+      return { skillId: s.id, score, reasons };
+    })
+    .filter((c) => c.score > 0)
+    .sort((a, b) => b.score - a.score);
+  const selectedSkillIds = candidates.slice(0, 3).map((c) => c.skillId);
+  const covered = new Set(
+    selectedSkillIds.flatMap((id) => manifests.find((s) => s.id === id)?.capabilities ?? []),
+  );
+  const missingCapabilities = analysis.requiredCapabilities.filter((c) => !covered.has(c));
+  return {
+    candidates,
+    selectedSkillIds,
+    confidence: candidates[0] ? Math.min(1, candidates[0].score / 7) : 0,
+    missingCapabilities,
+  };
+}
+export function createPlan(analysis: TaskAnalysis, routing: SkillRoutingResult): ExecutionPlan {
+  const selected = routing.selectedSkillIds.length
+    ? routing.selectedSkillIds.slice(0, 1)
+    : ['markdown-report'];
+  return {
+    goal: analysis.intent,
+    steps: selected.map((skillId, index) => ({
+      id: `step-${index + 1}`,
+      order: index + 1,
+      title: `Thực thi ${skillId}`,
+      description: `Dùng ${skillId} để đáp ứng tác vụ`,
+      skillId,
+      input: { path: '.' },
+      expectedOutput: 'Kết quả có cấu trúc',
+      risk: manifests.find((s) => s.id === skillId)?.riskLevel === 'medium' ? 'medium' : 'low',
+    })),
+  };
+}
+export function validatePlan(plan: ExecutionPlan, maxSteps: number) {
+  if (plan.steps.length > maxSteps) throw new Error('BUDGET_EXCEEDED');
+  const ids = new Set(manifests.map((s) => s.id));
+  const orders = new Set<number>();
+  for (const step of plan.steps) {
+    if (!ids.has(step.skillId) || orders.has(step.order)) throw new Error('PLAN_INVALID');
+    orders.add(step.order);
+  }
+  return plan;
+}
+export async function executeSkill(
+  id: string,
+  input: Record<string, unknown>,
+  workspace: string,
+  signal: AbortSignal,
+) {
+  if (signal.aborted) throw new Error('TASK_CANCELLED');
+  const path = String(input.path ?? '.');
+  if (id === 'filesystem-reader')
+    return { content: await readFile(safePath(workspace, path), 'utf8') };
+  if (id === 'filesystem-search') {
+    const entries = await readdir(safePath(workspace, path));
+    return { entries };
+  }
+  if (id === 'code-analyzer') {
+    const target = safePath(workspace, path);
+    const info = await stat(target);
+    return {
+      path: relative(workspace, target),
+      kind: info.isDirectory() ? 'directory' : 'file',
+      extension: extname(target),
+    };
+  }
+  if (id === 'markdown-report' || id === 'unit-test-generator') {
+    const dir = safePath(workspace, '.local-agent/output');
+    await mkdir(dir, { recursive: true });
+    const file = resolve(dir, `${id}-${Date.now()}.md`);
+    await writeFile(file, `# ${id}\n\nGenerated safely by Local Agent OS.\n`);
+    return { file: relative(workspace, file) };
+  }
+  if (id === 'test-runner') {
+    const command = String(input.command ?? 'yarn test');
+    const [bin, ...args] = assertAllowedCommand(command);
+    return new Promise((resolvePromise, reject) => {
+      const child = spawn(bin!, args, { cwd: workspace, shell: false, signal });
+      let stdout = '',
+        stderr = '';
+      child.stdout.on('data', (d) => (stdout += String(d)));
+      child.stderr.on('data', (d) => (stderr += String(d)));
+      child.on('close', (code) => resolvePromise({ code, stdout, stderr }));
+      child.on('error', reject);
+    });
+  }
+  throw new Error('SKILL_NOT_FOUND');
+}
