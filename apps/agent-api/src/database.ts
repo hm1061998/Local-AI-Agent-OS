@@ -8,6 +8,7 @@ import type {
   SkillManifest,
   SkillRecord,
   SkillCreationProposal,
+  AgentMessage,
 } from '@local-agent/agent-protocol';
 export class AgentDatabase {
   readonly db: Database.Database;
@@ -31,6 +32,9 @@ export class AgentDatabase {
     this.addColumn('sandbox_executions', 'output_json', 'TEXT');
     this.addColumn('sandbox_executions', 'staged_json', 'TEXT');
     this.addColumn('sandbox_executions', 'applied_json', 'TEXT');
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS agent_runs(task_id TEXT PRIMARY KEY,mode TEXT NOT NULL,state TEXT NOT NULL,current_owner TEXT,budget_json TEXT NOT NULL,usage_json TEXT NOT NULL,signals_json TEXT NOT NULL,started_at TEXT NOT NULL,updated_at TEXT NOT NULL,completed_at TEXT);CREATE TABLE IF NOT EXISTS agent_messages(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,correlation_id TEXT NOT NULL,causation_id TEXT,from_role TEXT NOT NULL,to_role TEXT NOT NULL,type TEXT NOT NULL,sequence INTEGER NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(task_id,sequence));CREATE TABLE IF NOT EXISTS agent_assignments(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,role TEXT NOT NULL,status TEXT NOT NULL,summary TEXT,created_at TEXT NOT NULL,completed_at TEXT);CREATE TABLE IF NOT EXISTS system_settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL);`,
+    );
   }
   private addColumn(table: string, column: string, definition: string) {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -294,5 +298,114 @@ export class AgentDatabase {
         'SELECT id,action,entity_type entityType,entity_id entityId,details_json details,created_at createdAt FROM audit_logs ORDER BY created_at DESC',
       )
       .all();
+  }
+  setting<T>(key: string, fallback: T): T {
+    const row = this.db
+      .prepare('SELECT value_json value FROM system_settings WHERE key=?')
+      .get(key) as { value: string } | undefined;
+    return row ? JSON.parse(row.value) : fallback;
+  }
+  setSetting(key: string, value: unknown) {
+    this.db
+      .prepare('INSERT OR REPLACE INTO system_settings(key,value_json,updated_at) VALUES(?,?,?)')
+      .run(key, JSON.stringify(value), new Date().toISOString());
+  }
+  createAgentRun(taskId: string, mode: string, state: string, budget: unknown, signals: unknown) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        'INSERT OR REPLACE INTO agent_runs(task_id,mode,state,current_owner,budget_json,usage_json,signals_json,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        taskId,
+        mode,
+        state,
+        'supervisor',
+        JSON.stringify(budget),
+        JSON.stringify({
+          modelCalls: 0,
+          messages: 0,
+          delegations: 0,
+          planRevisions: 0,
+          skillRevisions: 0,
+          executionRetries: 0,
+        }),
+        JSON.stringify(signals),
+        now,
+        now,
+      );
+  }
+  updateAgentRun(
+    taskId: string,
+    state: string,
+    owner: string | null,
+    usage: unknown,
+    completed = false,
+  ) {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        'UPDATE agent_runs SET state=?,current_owner=?,usage_json=?,updated_at=?,completed_at=CASE WHEN ? THEN ? ELSE completed_at END WHERE task_id=?',
+      )
+      .run(state, owner, JSON.stringify(usage), now, completed ? 1 : 0, now, taskId);
+  }
+  addAssignment(taskId: string, role: string, status: string, summary: string) {
+    this.db
+      .prepare(
+        'INSERT INTO agent_assignments(id,task_id,role,status,summary,created_at,completed_at) VALUES(?,?,?,?,?,?,?)',
+      )
+      .run(
+        crypto.randomUUID(),
+        taskId,
+        role,
+        status,
+        summary,
+        new Date().toISOString(),
+        status === 'completed' ? new Date().toISOString() : null,
+      );
+  }
+  saveAgentMessage(message: AgentMessage) {
+    const result = this.db
+      .prepare(
+        'INSERT OR IGNORE INTO agent_messages(id,task_id,correlation_id,causation_id,from_role,to_role,type,sequence,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        message.id,
+        message.taskId,
+        message.correlationId,
+        message.causationId ?? null,
+        message.from,
+        message.to,
+        message.type,
+        message.sequence,
+        JSON.stringify(message.payload),
+        message.timestamp,
+      );
+    return result.changes > 0;
+  }
+  agentFlow(taskId?: string) {
+    const runs = this.db
+      .prepare(
+        `SELECT task_id taskId,mode,state,current_owner currentOwner,budget_json budget,usage_json usage,signals_json signals,started_at startedAt,updated_at updatedAt,completed_at completedAt FROM agent_runs ${taskId ? 'WHERE task_id=?' : ''} ORDER BY started_at DESC`,
+      )
+      .all(...(taskId ? [taskId] : [])) as any[];
+    return runs.map((run) => ({
+      ...run,
+      budget: JSON.parse(run.budget),
+      usage: JSON.parse(run.usage),
+      signals: JSON.parse(run.signals),
+      messages: (
+        this.db
+          .prepare(
+            'SELECT id,task_id taskId,correlation_id correlationId,causation_id causationId,from_role "from",to_role "to",type,sequence,payload_json payload,timestamp FROM (SELECT *,created_at timestamp FROM agent_messages) WHERE task_id=? ORDER BY sequence',
+          )
+          .all(run.taskId) as any[]
+      ).map((m) => ({ ...m, payload: JSON.parse(m.payload) })),
+      assignments: this.db
+        .prepare(
+          'SELECT id,role,status,summary,created_at createdAt,completed_at completedAt FROM agent_assignments WHERE task_id=? ORDER BY created_at',
+        )
+        .all(run.taskId),
+    }));
   }
 }

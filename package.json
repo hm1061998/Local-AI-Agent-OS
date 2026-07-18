@@ -20,7 +20,8 @@
     "test": "nx run-many -t test",
     "build": "nx run-many -t build",
     "typecheck": "nx run-many -t typecheck",
-    "e2e": "nx e2e web"
+    "e2e": "nx e2e web",
+    "benchmark:agents": "tsx --tsconfig apps/agent-api/tsconfig.json apps/agent-api/src/benchmark.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.6",

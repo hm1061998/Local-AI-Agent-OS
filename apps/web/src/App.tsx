@@ -36,6 +36,7 @@ function Layout({ children }: { children: ReactNode }) {
           <Link to="/approvals">Approvals</Link>
           <Link to="/sandbox">Sandbox</Link>
           <Link to="/universe">Universe</Link>
+          <Link to="/agents">Agents</Link>
           <Link to="/workflows/new">Workflows</Link>
           <Link to="/settings/models">Models</Link>
         </nav>
@@ -179,6 +180,9 @@ function TaskDetail() {
             {task?.state}
           </p>
           <p>{task?.resultSummary || task?.errorMessage || task?.userInput}</p>
+          <p>
+            <Link to={`/tasks/${taskId}/agents`}>Open agent flow →</Link>
+          </p>
           {task?.state === 'waiting_for_approval' && (
             <p>
               <Link to="/approvals">Review skill proposal to continue this task →</Link>
@@ -193,6 +197,97 @@ function TaskDetail() {
           </button>
         </section>
         <Timeline />
+      </main>
+    </Layout>
+  );
+}
+
+function AgentFlow({ taskOnly = false }: { taskOnly?: boolean }) {
+  const { taskId = '' } = useParams();
+  const queryClient = useQueryClient();
+  const { data: settings } = useQuery({ queryKey: ['agent-settings'], queryFn: api.agentSettings });
+  const { data } = useQuery({
+    queryKey: ['agent-flow', taskId],
+    queryFn: () => (taskOnly ? api.taskAgents(taskId) : api.agentRuns()),
+    refetchInterval: 1500,
+  });
+  const runs = taskOnly ? (data ? [data] : []) : (data ?? []);
+  return (
+    <Layout>
+      <main>
+        <h1>Multi-agent control plane</h1>
+        <section className="card">
+          <h2>Operating mode</h2>
+          <select
+            aria-label="Agent mode"
+            value={settings?.mode ?? 'automatic'}
+            onChange={(event) =>
+              void api
+                .setAgentMode(event.target.value as 'automatic' | 'single' | 'multi')
+                .then(() => queryClient.invalidateQueries({ queryKey: ['agent-settings'] }))
+            }
+          >
+            <option value="automatic">Automatic</option>
+            <option value="single">Single-agent</option>
+            <option value="multi">Multi-agent</option>
+          </select>
+          <p className="muted">
+            Automatic uses risk, missing skills, step count, file changes and command execution.
+          </p>
+        </section>
+        {runs.map((run: any) => (
+          <section className="card agent-flow" key={run.taskId}>
+            <h2>
+              <Link to={`/tasks/${run.taskId}/agents`}>{run.taskId.slice(0, 8)}</Link> · {run.state}
+            </h2>
+            <p>
+              Owner: {run.currentOwner ?? 'none'} · Messages {run.usage.messages}/
+              {run.budget.maxTotalMessages} · Delegations {run.usage.delegations}/
+              {run.budget.maxDelegations}
+            </p>
+            <div className="agent-cluster">
+              {[
+                'supervisor',
+                'planner',
+                'skill_builder',
+                'security_reviewer',
+                'executor',
+                'result_judge',
+              ].map((role) => (
+                <span
+                  className={
+                    run.assignments.some((item: any) => item.role === role)
+                      ? 'agent-node active'
+                      : 'agent-node'
+                  }
+                  key={role}
+                >
+                  {role.replace('_', ' ')}
+                </span>
+              ))}
+            </div>
+            <ol className="message-flow">
+              {run.messages.map((message: any) => (
+                <li key={message.id}>
+                  <b>
+                    {message.sequence}. {message.from} → {message.to}
+                  </b>
+                  <span>{message.type}</span>
+                </li>
+              ))}
+            </ol>
+            {run.assignments.map((item: any) => (
+              <p key={item.id}>
+                <b>{item.role}:</b> {item.summary}
+              </p>
+            ))}
+          </section>
+        ))}
+        {!runs.length && (
+          <p className="muted">
+            No multi-agent run has been recorded yet. Single-agent tasks remain available.
+          </p>
+        )}
       </main>
     </Layout>
   );
@@ -532,6 +627,8 @@ export function App() {
     <Routes>
       <Route path="/workspace" element={<Workspace />} />
       <Route path="/tasks/:taskId" element={<TaskDetail />} />
+      <Route path="/agents" element={<AgentFlow />} />
+      <Route path="/tasks/:taskId/agents" element={<AgentFlow taskOnly />} />
       <Route path="/skills" element={<Skills />} />
       <Route path="/skills/:skillId" element={<SkillDetail />} />
       <Route path="/approvals" element={<Approvals />} />

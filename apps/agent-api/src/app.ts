@@ -37,6 +37,7 @@ import {
   skillManifestSchema,
   type SkillCreationProposal,
   type SkillManifest,
+  defaultMultiAgentBudget,
 } from '@local-agent/agent-protocol';
 import { AgentDatabase } from './database';
 import { manifests } from './skills';
@@ -49,6 +50,14 @@ import {
   validateWorkflow,
   aggregatePermissions,
 } from './phase2';
+import {
+  BudgetGuard,
+  MessageBus,
+  decideAgentMode,
+  inferTaskSignals,
+  runLocalBenchmark,
+  type AgentMode,
+} from './multi-agent';
 @Injectable()
 export class RuntimeService {
   readonly db = new AgentDatabase();
@@ -57,6 +66,128 @@ export class RuntimeService {
   readonly sandbox = new DockerSandboxRunner();
   constructor() {
     manifests.forEach((m) => this.db.installSkill(m));
+  }
+  startTask(taskId: string, input: string, requestedMode?: AgentMode) {
+    const configured = this.db.setting<AgentMode>('agentMode', 'automatic');
+    const signals = inferTaskSignals(input);
+    const mode = decideAgentMode(requestedMode ?? configured, signals);
+    if (mode === 'single') {
+      void this.orchestrator.run(taskId, input);
+      return mode;
+    }
+    const guard = new BudgetGuard();
+    const bus = new MessageBus(this.db, guard, taskId);
+    this.db.createAgentRun(taskId, mode, 'TASK_RECEIVED', guard.limits, signals);
+    const assign = (role: string, summary: string) =>
+      this.db.addAssignment(taskId, role, 'completed', summary);
+    try {
+      this.db.updateAgentRun(taskId, 'SUPERVISOR_ANALYSIS', 'supervisor', guard.usage);
+      guard.consume('delegations');
+      assign('supervisor', 'Selected multi-agent mode using deterministic task signals.');
+      const request = bus.send('supervisor', 'planner', 'PLAN_REQUESTED', {
+        summary: input,
+        signals,
+      });
+      assign(
+        'planner',
+        `Prepared a bounded plan with ${signals.estimatedSteps} estimated step(s).`,
+      );
+      const plan = bus.send(
+        'planner',
+        'supervisor',
+        'PLAN_READY',
+        {
+          objectives: [input],
+          requiredSkills: [],
+          missingCapabilities: signals.missingExecutableSkill ? ['executable-skill'] : [],
+          risks: [signals.risk],
+          approvalPoints: signals.missingExecutableSkill ? ['install executable skill'] : [],
+        },
+        request.id,
+      );
+      if (signals.missingExecutableSkill) {
+        guard.consume('delegations');
+        bus.send(
+          'supervisor',
+          'skill_builder',
+          'SKILL_PROPOSAL_REQUESTED',
+          { capability: 'executable-skill' },
+          plan.id,
+        );
+        assign('skill_builder', 'Created a proposal only; activation is prohibited before review.');
+        bus.send('skill_builder', 'supervisor', 'SKILL_PROPOSAL_READY', { status: 'proposal' });
+        guard.consume('delegations');
+        bus.send('supervisor', 'security_reviewer', 'SECURITY_REVIEW_REQUESTED', {
+          risk: signals.risk,
+        });
+        assign('security_reviewer', 'Review requires explicit user approval.');
+        bus.send('security_reviewer', 'supervisor', 'SECURITY_REVIEW_READY', {
+          decision: 'approved_with_conditions',
+          riskLevel: signals.risk,
+          requiresUserApproval: true,
+          findings: [],
+          requiredChanges: [],
+          permissionChanges: {},
+        });
+        this.db.createApproval(createProposal(['executable-skill']), taskId);
+        this.db.updateAgentRun(taskId, 'USER_APPROVAL_REQUIRED', 'supervisor', guard.usage);
+        this.db.audit('MULTI_AGENT_APPROVAL_REQUIRED', 'task', taskId, { signals });
+        return mode;
+      }
+      guard.consume('delegations');
+      bus.send('supervisor', 'executor', 'EXECUTION_ASSIGNED', { approvedPlan: true }, plan.id);
+      assign('executor', 'Delegated execution to the stable single-agent runtime.');
+      this.db.updateAgentRun(taskId, 'EXECUTION_RUNNING', 'executor', guard.usage);
+      void this.orchestrator
+        .run(taskId, input)
+        .then(() => {
+          const task = this.db.getTask(taskId);
+          bus.send('executor', 'supervisor', 'EXECUTION_FINISHED', { state: task?.state });
+          guard.consume('delegations');
+          bus.send('supervisor', 'result_judge', 'RESULT_REVIEW_REQUESTED', { state: task?.state });
+          assign('result_judge', 'Applied rule-based terminal-state validation.');
+          bus.send('result_judge', 'supervisor', 'RESULT_VALIDATED', {
+            passed: task?.state === 'completed',
+            score: task?.state === 'completed' ? 1 : 0,
+            checks: [
+              {
+                name: 'terminal state',
+                passed: task?.state === 'completed',
+                evidence: task?.state ?? 'missing',
+              },
+            ],
+            retryRecommended: false,
+          });
+          this.db.updateAgentRun(
+            taskId,
+            task?.state === 'completed' ? 'TASK_COMPLETED' : 'TASK_FAILED',
+            null,
+            guard.usage,
+            true,
+          );
+        })
+        .catch((error) =>
+          this.db.updateAgentRun(
+            taskId,
+            error?.message === 'BUDGET_EXCEEDED' ? 'BUDGET_EXCEEDED' : 'TASK_FAILED',
+            null,
+            guard.usage,
+            true,
+          ),
+        );
+    } catch (error) {
+      this.db.updateAgentRun(
+        taskId,
+        error instanceof Error && error.message === 'BUDGET_EXCEEDED'
+          ? 'BUDGET_EXCEEDED'
+          : 'AGENT_FAILED',
+        null,
+        guard.usage,
+        true,
+      );
+      if (!signals.missingExecutableSkill) void this.orchestrator.run(taskId, input);
+    }
+    return mode;
   }
 }
 @WebSocketGateway({ namespace: '/agent', cors: { origin: '*' } })
@@ -449,10 +580,10 @@ export class ApiController {
     this.r.db.installSkill(manifest, 'active', 'user');
     return manifest;
   }
-  @Post('tasks') create(@Body() b: { input?: string }) {
+  @Post('tasks') create(@Body() b: { input?: string; mode?: AgentMode }) {
     if (!b.input?.trim()) throw new HttpException('input is required', 400);
     const t = this.r.db.createTask(b.input.trim());
-    void this.r.orchestrator.run(t.id, t.userInput);
+    this.r.startTask(t.id, t.userInput, b.mode);
     return t;
   }
   @Get('tasks') tasks() {
@@ -469,6 +600,27 @@ export class ApiController {
   }
   @Get('tasks/:id/events') events(@Param('id') id: string) {
     return this.r.db.events(id);
+  }
+  @Get('agents') agentRuns() {
+    return this.r.db.agentFlow();
+  }
+  @Get('tasks/:id/agents') taskAgents(@Param('id') id: string) {
+    return this.r.db.agentFlow(id)[0] ?? null;
+  }
+  @Get('agent-settings') agentSettings() {
+    return {
+      mode: this.r.db.setting<AgentMode>('agentMode', 'automatic'),
+      budget: defaultMultiAgentBudget,
+    };
+  }
+  @Post('agent-settings') setAgentSettings(@Body() body: { mode?: AgentMode }) {
+    if (!body.mode || !['automatic', 'single', 'multi'].includes(body.mode))
+      throw new HttpException('invalid agent mode', 400);
+    this.r.db.setSetting('agentMode', body.mode);
+    return { mode: body.mode, budget: defaultMultiAgentBudget };
+  }
+  @Get('benchmarks/multi-agent') benchmark() {
+    return runLocalBenchmark();
   }
 }
 @Module({ providers: [RuntimeService, AgentGateway], controllers: [ApiController] })

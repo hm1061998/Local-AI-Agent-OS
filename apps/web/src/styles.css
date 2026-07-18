@@ -4,6 +4,36 @@
   background: #071013;
   color-scheme: dark;
 }
+.agent-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin: 1rem 0;
+}
+.agent-node {
+  border: 1px solid #24434a;
+  border-radius: 999px;
+  padding: 0.55rem 0.8rem;
+  color: #78959a;
+}
+.agent-node.active {
+  border-color: #5dffd0;
+  color: #5dffd0;
+  box-shadow: 0 0 18px #5dffd033;
+}
+.message-flow {
+  list-style: none;
+  padding: 0;
+}
+.message-flow li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  border-left: 2px solid #5dffd0;
+  padding: 0.55rem 0.8rem;
+  margin: 0.35rem 0;
+  background: #0c2022;
+}
 * {
   box-sizing: border-box;
 }

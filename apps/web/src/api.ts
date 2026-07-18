@@ -67,5 +67,15 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ definition }),
     }),
+  agentRuns: () => json<any[]>('/agents'),
+  taskAgents: (id: string) => json<any>(`/tasks/${id}/agents`),
+  agentSettings: () => json<any>('/agent-settings'),
+  setAgentMode: (mode: 'automatic' | 'single' | 'multi') =>
+    json<any>('/agent-settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    }),
+  benchmark: () => json<any>('/benchmarks/multi-agent'),
 };
 export const socket = io('/agent', { path: '/socket.io' });
