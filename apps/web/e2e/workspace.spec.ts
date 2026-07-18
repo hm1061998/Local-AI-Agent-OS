@@ -35,3 +35,29 @@ test('shows model unavailable guidance', async ({ page }) => {
   await expect(page.getByText('Không thể kết nối Ollama.')).toBeVisible();
   await expect(page.getByText('ollama pull deepseek-r1')).toBeVisible();
 });
+
+test('approval center approves a declarative skill proposal', async ({ page }) => {
+  let status = 'pending';
+  const approval = () => ({ id: 'approval-1', status, proposal: { name: 'json-normalizer', reason: 'Missing normalization capability', runtimeType: 'prompt', riskLevel: 'low', permissions: { filesystem: { read: [], write: [], delete: [] }, commands: [], network: { enabled: false, allowedHosts: [] }, environmentVariables: [] } } });
+  await page.route('**/api/approvals', (route) => route.fulfill({ json: [approval()] }));
+  await page.route('**/api/approvals/approval-1/approve', (route) => { status = 'approved'; return route.fulfill({ json: { approval: approval() } }); });
+  await page.goto('/approvals');
+  await expect(page.getByText('json-normalizer')).toBeVisible();
+  await page.getByRole('button', { name: 'Approve version' }).click();
+  await expect.poll(() => status).toBe('approved');
+});
+
+test('skill studio lists active declarative skills', async ({ page }) => {
+  await page.route('**/api/skills', (route) => route.fulfill({ json: [{ id: 'json-normalizer', name: 'JSON Normalizer', version: '1.0.0', status: 'active', manifest: { runtime: { type: 'prompt' } } }] }));
+  await page.goto('/skills');
+  await expect(page.getByRole('heading', { name: 'Skill Studio' })).toBeVisible();
+  await expect(page.getByText('JSON Normalizer')).toBeVisible();
+  await expect(page.getByText('active')).toBeVisible();
+});
+
+test('task waiting for a generated skill links to approval center', async ({ page }) => {
+  await page.route('**/api/tasks/task-1', route => route.fulfill({ json: { ...task, state: 'waiting_for_approval' } }));
+  await page.goto('/tasks/task-1');
+  await expect(page.getByTestId('task-state')).toHaveText('waiting_for_approval');
+  await expect(page.getByRole('link', { name: /Review skill proposal/ })).toHaveAttribute('href', '/approvals');
+});

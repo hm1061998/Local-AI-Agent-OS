@@ -2,6 +2,8 @@
 
 Local-first AI agent with a React web interface, NestJS API, SQLite, and DeepSeek through Ollama. Phase 1 includes structured task analysis, six static skills, a bounded FSM orchestrator, persisted operational events, cancellation, and a live execution timeline. It does not generate executable skills.
 
+Phase 2 adds a semantic skill registry, prompt/workflow proposals, versioning, approval workflows, safe ZIP import/export, Approval Center (`/approvals`), and Skill Studio (`/skills`). Executable TypeScript/Python generation remains forbidden.
+
 ## Requirements
 
 - Node.js 22 (pinned to `22.22.2` in `.nvmrc`)

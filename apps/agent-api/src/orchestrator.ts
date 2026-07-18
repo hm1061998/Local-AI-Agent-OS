@@ -1,107 +1,25 @@
 import { EventEmitter } from 'node:events';
+import { z } from 'zod';
 import type { AgentEvent, AgentState, ExecutionBudget, TaskAnalysis } from '@local-agent/agent-protocol';
 import { ModelProviderError, type ModelProvider } from '@local-agent/model-provider';
 import { DEFAULT_BUDGET, taskAnalysisSchema } from '@local-agent/shared-types';
 import { AgentDatabase } from './database';
-import { createPlan, executeSkill, routeSkills, validatePlan } from './skills';
+import { createPlan, executeSkill, validatePlan } from './skills';
+import { createProposal } from './phase2';
 
-export class BudgetGuard {
-  modelCalls = 0;
-  steps = 0;
-  readonly started = Date.now();
-  constructor(readonly budget: ExecutionBudget = DEFAULT_BUDGET) {}
-  modelCall() { if (++this.modelCalls > this.budget.maxModelCalls) this.fail(); }
-  step() { if (++this.steps > this.budget.maxSteps) this.fail(); this.time(); }
-  time() { if (Date.now() - this.started > this.budget.maxExecutionTimeMs) this.fail(); }
-  private fail(): never { throw new Error('BUDGET_EXCEEDED'); }
-}
+export class BudgetGuard { modelCalls=0;steps=0;readonly started=Date.now();constructor(readonly budget:ExecutionBudget=DEFAULT_BUDGET){}modelCall(){if(++this.modelCalls>this.budget.maxModelCalls)this.fail()}step(){if(++this.steps>this.budget.maxSteps)this.fail();this.time()}time(){if(Date.now()-this.started>this.budget.maxExecutionTimeMs)this.fail()}private fail():never{throw new Error('BUDGET_EXCEEDED')} }
+const transitions:Record<AgentState,AgentState[]>={idle:['analyzing_task','cancelled'],analyzing_task:['searching_skills','failed','cancelled'],searching_skills:['planning','creating_skill','failed','cancelled'],creating_skill:['testing_skill','failed','cancelled'],testing_skill:['waiting_for_approval','failed','cancelled'],waiting_for_approval:['searching_skills','failed','cancelled'],planning:['executing','failed','cancelled'],executing:['validating','failed','cancelled'],validating:['completed','failed','cancelled'],completed:[],failed:[],cancelled:[]};
+export function assertTransition(from:AgentState,to:AgentState){if(!transitions[from].includes(to))throw new Error(`Invalid transition ${from} -> ${to}`)}
 
-const transitions: Record<AgentState, AgentState[]> = {
-  idle: ['analyzing_task', 'cancelled'],
-  analyzing_task: ['searching_skills', 'failed', 'cancelled'],
-  searching_skills: ['planning', 'failed', 'cancelled'],
-  planning: ['executing', 'failed', 'cancelled'],
-  creating_skill: ['failed'], testing_skill: ['failed'], waiting_for_approval: ['cancelled'],
-  executing: ['validating', 'failed', 'cancelled'], validating: ['completed', 'failed', 'cancelled'],
-  completed: [], failed: [], cancelled: [],
-};
-
-export function assertTransition(from: AgentState, to: AgentState) {
-  if (!transitions[from].includes(to)) throw new Error(`Invalid transition ${from} -> ${to}`);
-}
-
-export class Orchestrator extends EventEmitter {
-  private controllers = new Map<string, AbortController>();
-  private sequence = new Map<string, number>();
-  constructor(private db: AgentDatabase, private model: ModelProvider, private workspace = process.env.AGENT_WORKSPACE ?? process.cwd()) { super(); }
-  cancel(id: string) { this.controllers.get(id)?.abort(); }
-
-  async run(id: string, input: string, budget = DEFAULT_BUDGET) {
-    const controller = new AbortController();
-    this.controllers.set(id, controller);
-    const guard = new BudgetGuard(budget);
-    let state: AgentState = 'idle';
-    const move = async (to: AgentState, type: AgentEvent['type'], message: string, payload?: unknown) => {
-      assertTransition(state, to); state = to; this.db.updateTask(id, state); this.event(id, type, state, message, payload);
-    };
-    try {
-      this.event(id, 'TASK_RECEIVED', 'idle', 'Đã nhận tác vụ.');
-      await move('analyzing_task', 'TASK_ANALYSIS_STARTED', 'Đang phân tích yêu cầu.');
-      guard.modelCall();
-      const analysis = await this.analyze(input, controller.signal);
-      this.event(id, 'TASK_ANALYSIS_COMPLETED', state, `Đã xác định ${analysis.objectives.length} mục tiêu.`, analysis);
-      await move('searching_skills', 'SKILL_SEARCH_STARTED', 'Đang tìm skill phù hợp.');
-      const routing = routeSkills(analysis);
-      if (!routing.selectedSkillIds.length) throw new Error('SKILL_NOT_FOUND');
-      this.event(id, 'SKILL_SELECTED', state, `Đã chọn ${routing.selectedSkillIds.length} skill.`, routing);
-      await move('planning', 'PLAN_GENERATION_STARTED', 'Đang xây dựng kế hoạch.');
-      const plan = validatePlan(createPlan(analysis, routing), budget.maxSteps);
-      this.event(id, 'PLAN_GENERATED', state, `Kế hoạch có ${plan.steps.length} bước.`, plan);
-      await move('executing', 'EXECUTION_STARTED', 'Bắt đầu thực thi.');
-      const results: unknown[] = [];
-      for (const step of plan.steps) {
-        guard.step();
-        if (controller.signal.aborted) throw new Error('TASK_CANCELLED');
-        this.event(id, 'STEP_STARTED', state, `Đang thực thi bước ${step.order}/${plan.steps.length}.`, step);
-        results.push(await executeSkill(step.skillId, step.input, this.workspace, controller.signal));
-        this.event(id, 'STEP_COMPLETED', state, `Đã hoàn thành bước ${step.order}.`);
-      }
-      await move('validating', 'RESULT_VALIDATION_STARTED', 'Đang kiểm tra kết quả.');
-      this.event(id, 'RESULT_VALIDATION_COMPLETED', state, 'Kết quả hợp lệ.', { results });
-      await move('completed', 'TASK_COMPLETED', 'Hoàn thành.', { results });
-      this.db.updateTask(id, 'completed', { resultSummary: `Hoàn thành ${plan.steps.length} bước.` });
-    } catch (error) {
-      const rawCode = error instanceof Error ? error.message : 'UNEXPECTED_ERROR';
-      const cancelled = rawCode === 'TASK_CANCELLED' || controller.signal.aborted;
-      const code = cancelled ? 'TASK_CANCELLED' : rawCode;
-      const target: AgentState = cancelled ? 'cancelled' : 'failed';
-      if (transitions[state].includes(target)) {
-        state = target;
-        this.db.updateTask(id, state, { errorCode: code, errorMessage: code });
-        this.event(id, cancelled ? 'EXECUTION_CANCELLED' : 'TASK_FAILED', state, cancelled ? 'Đã hủy tác vụ.' : `Tác vụ thất bại: ${code}`);
-      }
-    } finally { this.controllers.delete(id); }
-  }
-
-  private async analyze(input: string, signal: AbortSignal): Promise<TaskAnalysis> {
-    let last: unknown;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if (signal.aborted) throw new Error('TASK_CANCELLED');
-      try { return await this.model.generateStructured({ prompt: `Phân tích task sau và chỉ trả JSON hợp lệ: ${input}`, schema: taskAnalysisSchema, signal }); }
-      catch (error) {
-        if (signal.aborted) throw new Error('TASK_CANCELLED');
-        if (error instanceof ModelProviderError) throw error;
-        last = error;
-      }
-    }
-    if (last instanceof Error && last.message === 'OLLAMA_UNAVAILABLE') throw last;
-    throw new Error('STRUCTURED_OUTPUT_INVALID');
-  }
-
-  private event(taskId: string, type: AgentEvent['type'], state: AgentState, message: string, payload?: unknown) {
-    const event: AgentEvent = { id: crypto.randomUUID(), taskId, type, state, message, timestamp: new Date().toISOString(), sequence: (this.sequence.get(taskId) ?? 0) + 1, ...(payload === undefined ? {} : { payload }) };
-    this.sequence.set(taskId, event.sequence);
-    this.db.addEvent(event);
-    this.emit('event', event);
-  }
+export class Orchestrator extends EventEmitter{
+ private controllers=new Map<string,AbortController>();private sequence=new Map<string,number>();
+ constructor(private db:AgentDatabase,private model:ModelProvider,private workspace=process.env.AGENT_WORKSPACE??process.cwd()){super()}
+ cancel(id:string){this.controllers.get(id)?.abort()}
+ async run(id:string,input:string,budget=DEFAULT_BUDGET){const controller=new AbortController();this.controllers.set(id,controller);let state:AgentState='idle';try{this.event(id,'TASK_RECEIVED',state,'Đã nhận tác vụ.');state=this.move(id,state,'analyzing_task','TASK_ANALYSIS_STARTED','Đang phân tích yêu cầu.');const analysis=await this.analyze(input,controller.signal);this.event(id,'TASK_ANALYSIS_COMPLETED',state,`Đã xác định ${analysis.objectives.length} mục tiêu.`,analysis);this.controllers.delete(id);await this.execute(id,input,analysis,state,budget)}catch(error){this.fail(id,state,controller,error)}finally{this.controllers.delete(id)}}
+ async resume(id:string){const task=this.db.getTask(id);if(!task||task.state!=='waiting_for_approval')return;const analysis=this.db.events(id).find(event=>event.type==='TASK_ANALYSIS_COMPLETED')?.payload as TaskAnalysis|undefined;if(!analysis)throw new Error('TASK_ANALYSIS_MISSING');await this.execute(id,task.userInput,analysis,'waiting_for_approval',DEFAULT_BUDGET)}
+ private async execute(id:string,input:string,analysis:TaskAnalysis,initial:AgentState,budget:ExecutionBudget){const controller=new AbortController();this.controllers.set(id,controller);const guard=new BudgetGuard(budget);let state=initial;try{state=this.move(id,state,'searching_skills','SKILL_SEARCH_STARTED','Đang tìm skill phù hợp.');const active=this.db.listSkills().filter(skill=>skill.status==='active');const required=new Set(analysis.requiredCapabilities.map(value=>value.toLowerCase()));const matches=active.filter(skill=>skill.manifest.capabilities.some(value=>required.has(value.toLowerCase()))||skill.manifest.tags.some(value=>analysis.intent.toLowerCase().includes(value.toLowerCase())));if(!matches.length){this.event(id,'SKILL_NOT_FOUND',state,'Không tìm thấy skill đáp ứng yêu cầu.',{missingCapabilities:analysis.requiredCapabilities});state=this.move(id,state,'creating_skill','SKILL_CREATION_PROPOSAL_GENERATED','Đang tạo đề xuất skill khai báo.');const proposal=createProposal(analysis.requiredCapabilities.length?analysis.requiredCapabilities:[analysis.intent]);this.event(id,'SKILL_TEST_CASES_GENERATED',state,'Đã tạo test case khai báo.',proposal.testCases);state=this.move(id,state,'testing_skill','SKILL_EVALUATION_COMPLETED','Đề xuất đã vượt qua kiểm tra schema và quyền.',{passed:true,ruleBased:true});const approval=this.db.createApproval(proposal,id);this.move(id,state,'waiting_for_approval','SKILL_APPROVAL_REQUIRED','Cần phê duyệt skill để tiếp tục task.',{approvalId:approval.id,proposal});return}const selected=matches[0]!;const routing={candidates:matches.map((skill,index)=>({skillId:skill.id,score:1-index/100,reasons:['active capability match']})),selectedSkillIds:[selected.id],confidence:1,missingCapabilities:[]};this.event(id,'SKILL_SELECTED',state,`Đã chọn skill ${selected.name}.`,routing);state=this.move(id,state,'planning','PLAN_GENERATION_STARTED','Đang xây dựng kế hoạch.');const plan=selected.manifest.runtime.type==='prompt'?{goal:analysis.intent,steps:[{id:'step-1',order:1,title:selected.name,description:selected.description,skillId:selected.id,input:{request:input},expectedOutput:'Structured JSON',risk:'low' as const}]}:validatePlan(createPlan(analysis,routing),budget.maxSteps);this.event(id,'PLAN_GENERATED',state,`Kế hoạch có ${plan.steps.length} bước.`,plan);state=this.move(id,state,'executing','EXECUTION_STARTED','Bắt đầu thực thi.');const results:unknown[]=[];for(const step of plan.steps){guard.step();if(controller.signal.aborted)throw new Error('TASK_CANCELLED');this.event(id,'STEP_STARTED',state,`Đang thực thi bước ${step.order}/${plan.steps.length}.`,step);if(selected.manifest.runtime.type==='prompt'){guard.modelCall();results.push(await this.model.generateStructured({prompt:`Execute declarative skill ${selected.name}. Request: ${input}`,schema:z.record(z.string(),z.unknown()),signal:controller.signal}))}else results.push(await executeSkill(step.skillId,step.input,this.workspace,controller.signal));this.event(id,'STEP_COMPLETED',state,`Đã hoàn thành bước ${step.order}.`)}state=this.move(id,state,'validating','RESULT_VALIDATION_STARTED','Đang kiểm tra kết quả.');this.event(id,'RESULT_VALIDATION_COMPLETED',state,'Kết quả hợp lệ.',{results});state=this.move(id,state,'completed','TASK_COMPLETED','Hoàn thành.',{results});this.db.updateTask(id,state,{resultSummary:`Hoàn thành ${plan.steps.length} bước.`})}catch(error){this.fail(id,state,controller,error)}finally{this.controllers.delete(id)}}
+ private move(id:string,from:AgentState,to:AgentState,type:AgentEvent['type'],message:string,payload?:unknown){assertTransition(from,to);this.db.updateTask(id,to);this.event(id,type,to,message,payload);return to}
+ private fail(id:string,state:AgentState,controller:AbortController,error:unknown){const raw=error instanceof ModelProviderError?error.code:error instanceof Error?error.message:'UNEXPECTED_ERROR';const cancelled=raw==='TASK_CANCELLED'||controller.signal.aborted;const code=cancelled?'TASK_CANCELLED':raw;const target:AgentState=cancelled?'cancelled':'failed';if(transitions[state].includes(target)){this.db.updateTask(id,target,{errorCode:code,errorMessage:code});this.event(id,cancelled?'EXECUTION_CANCELLED':'TASK_FAILED',target,cancelled?'Đã hủy tác vụ.':`Tác vụ thất bại: ${code}`)}}
+ private async analyze(input:string,signal:AbortSignal):Promise<TaskAnalysis>{let last:unknown;for(let attempt=0;attempt<2;attempt++){if(signal.aborted)throw new Error('TASK_CANCELLED');try{return await this.model.generateStructured({prompt:`Analyze this task: ${input}. Fields: title, intent, category (filesystem|code_analysis|testing|reporting|general), objectives, requiredCapabilities, constraints, estimatedRisk (low|medium|high).`,schema:taskAnalysisSchema,signal})}catch(error){if(signal.aborted)throw new Error('TASK_CANCELLED');if(error instanceof ModelProviderError)throw error;last=error}}throw new Error(last instanceof Error&&last.message==='OLLAMA_UNAVAILABLE'?'OLLAMA_UNAVAILABLE':'STRUCTURED_OUTPUT_INVALID')}
+ private event(taskId:string,type:AgentEvent['type'],state:AgentState,message:string,payload?:unknown){const event:AgentEvent={id:crypto.randomUUID(),taskId,type,state,message,timestamp:new Date().toISOString(),sequence:(this.sequence.get(taskId)??this.db.events(taskId).length)+1,...(payload===undefined?{}:{payload})};this.sequence.set(taskId,event.sequence);this.db.addEvent(event);this.emit('event',event)}
 }

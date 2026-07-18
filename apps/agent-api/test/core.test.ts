@@ -3,7 +3,7 @@ import { taskAnalysisSchema, DEFAULT_BUDGET } from '@local-agent/shared-types';
 import { skillManifestSchema } from '@local-agent/skill-schema';
 import { MockModelProvider } from '@local-agent/test-utils';
 import type { StructuredGenerationRequest } from '@local-agent/model-provider';
-import { ModelProviderError, OllamaModelProvider } from '@local-agent/model-provider';
+import { ModelProviderError, OllamaModelProvider, parseStructuredJson } from '@local-agent/model-provider';
 import { AgentDatabase } from '../src/database';
 import { BudgetGuard, Orchestrator, assertTransition } from '../src/orchestrator';
 import { allowedCommands, assertAllowedCommand, createPlan, manifests, routeSkills, safePath, validatePlan } from '../src/skills';
@@ -11,6 +11,7 @@ import { allowedCommands, assertAllowedCommand, createPlan, manifests, routeSkil
 const analysis = taskAnalysisSchema.parse({ title: 'Read', intent: 'read file', category: 'filesystem', objectives: ['read'], requiredCapabilities: ['filesystem:read'], constraints: [], estimatedRisk: 'low' });
 
 describe('schemas', () => {
+  it('parses DeepSeek reasoning wrappers', () => expect(parseStructuredJson('<think>hidden</think>```json\n{"ok":true}\n```')).toEqual({ ok: true }));
   it('validates task analysis', () => expect(analysis.title).toBe('Read'));
   it('validates six manifests', () => expect(manifests.map((manifest) => skillManifestSchema.parse(manifest))).toHaveLength(6));
 });
@@ -29,7 +30,7 @@ describe('security and FSM', () => {
 });
 
 describe('integration', () => {
-  it('completes with mock provider', async () => { const db = new AgentDatabase(':memory:'); const task = db.createTask('make report'); const orchestrator = new Orchestrator(db, new MockModelProvider(), process.cwd()); await orchestrator.run(task.id, task.userInput); expect(db.getTask(task.id)).toMatchObject({ state: 'completed' }); expect(db.events(task.id).at(-1)?.type).toBe('TASK_COMPLETED'); });
+  it('completes with mock provider', async () => { const db = new AgentDatabase(':memory:'); manifests.forEach(manifest=>db.installSkill(manifest)); const task = db.createTask('make report'); const orchestrator = new Orchestrator(db, new MockModelProvider(), process.cwd()); await orchestrator.run(task.id, task.userInput); expect(db.getTask(task.id)).toMatchObject({ state: 'completed' }); expect(db.events(task.id).at(-1)?.type).toBe('TASK_COMPLETED'); });
   it('persists before emit', async () => { const db = new AgentDatabase(':memory:'); const task = db.createTask('report'); const orchestrator = new Orchestrator(db, new MockModelProvider(), process.cwd()); let persisted = true; orchestrator.on('event', (event) => { persisted &&= db.events(task.id).some((row) => row.id === event.id); }); await orchestrator.run(task.id, task.userInput); expect(persisted).toBe(true); });
   it('cancels an in-flight model call', async () => { const db = new AgentDatabase(':memory:'); const task = db.createTask('slow'); class SlowProvider extends MockModelProvider { override async generateStructured<T>(request: StructuredGenerationRequest<T>): Promise<T> { return new Promise<T>((_, reject) => request.signal?.addEventListener('abort', () => reject(new Error('TASK_CANCELLED')), { once: true })); } } const orchestrator = new Orchestrator(db, new SlowProvider()); const running = orchestrator.run(task.id, task.userInput); await new Promise((resolve) => setTimeout(resolve, 10)); orchestrator.cancel(task.id); await running; expect(db.getTask(task.id)).toMatchObject({ state: 'cancelled', errorCode: 'TASK_CANCELLED' }); });
   it('fails after one structured-output retry', async () => { const db = new AgentDatabase(':memory:'); const task = db.createTask('invalid'); let calls = 0; class InvalidProvider extends MockModelProvider { override async generateStructured<T>(): Promise<T> { calls += 1; throw new Error('invalid json'); } } const orchestrator = new Orchestrator(db, new InvalidProvider()); await orchestrator.run(task.id, task.userInput); expect(calls).toBe(2); expect(db.getTask(task.id)).toMatchObject({ state: 'failed', errorCode: 'STRUCTURED_OUTPUT_INVALID' }); });

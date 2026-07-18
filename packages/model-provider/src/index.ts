@@ -30,6 +30,22 @@ export class ModelProviderError extends Error {
   }
 }
 
+export function parseStructuredJson(value: string): unknown {
+  const cleaned = value.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+  try { return JSON.parse(cleaned); } catch { /* Try the first balanced JSON object below. */ }
+  const start = cleaned.indexOf('{');
+  if (start < 0) throw new SyntaxError('No JSON object found in model response');
+  let depth = 0, quoted = false, escaped = false;
+  for (let index = start; index < cleaned.length; index++) {
+    const char = cleaned[index];
+    if (quoted) { if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === '"') quoted = false; continue; }
+    if (char === '"') quoted = true;
+    else if (char === '{') depth++;
+    else if (char === '}' && --depth === 0) return JSON.parse(cleaned.slice(start, index + 1));
+  }
+  throw new SyntaxError('Incomplete JSON object in model response');
+}
+
 function parseNumGpu(value: string | undefined): number {
   if (value === undefined || value.trim() === '') return 0;
   const parsed = Number(value);
@@ -78,9 +94,11 @@ export class OllamaModelProvider implements ModelProvider {
   }
 
   async generateStructured<T>(request: StructuredGenerationRequest<T>): Promise<T> {
-    const response = await this.post('/api/generate', { model: this.config.chatModel, prompt: request.prompt, format: 'json', stream: false, options: { num_gpu: this.config.numGpu } }, request.signal);
+    const jsonSchema = 'toJSONSchema' in request.schema ? (request.schema as unknown as {toJSONSchema():unknown}).toJSONSchema() : undefined;
+    const prompt = `${request.prompt}\nReturn exactly one JSON object. Do not include markdown or reasoning.${jsonSchema ? `\nRequired JSON Schema:\n${JSON.stringify(jsonSchema)}` : ''}`;
+    const response = await this.post('/api/generate', { model: this.config.chatModel, prompt, format: jsonSchema ?? 'json', stream: false, think: false, options: { num_gpu: this.config.numGpu, temperature: 0 } }, request.signal);
     const data = await response.json() as { response: string };
-    return request.schema.parse(JSON.parse(data.response));
+    return request.schema.parse(parseStructuredJson(data.response));
   }
 
   async embed(texts: string[]): Promise<number[][]> {
