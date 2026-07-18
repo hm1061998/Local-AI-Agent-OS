@@ -235,23 +235,8 @@ function tracePrefix(event: AgentEvent) {
 function eventDetails(event: AgentEvent) {
   const payload = event.payload as any;
   if (!payload || typeof payload !== 'object') return null;
-  if (event.type === 'SKILL_SELECTED')
-    return (
-      <small className="trace-detail">
-        Registry: {payload.registryCount ?? '?'} skill · Match:{' '}
-        {payload.selectedSkill?.name ?? payload.selectedSkillIds?.[0]}
-      </small>
-    );
-  if (event.type === 'STEP_STARTED')
-    return <small className="trace-detail">Params: {JSON.stringify(payload.input ?? {})}</small>;
   if (event.type === 'STEP_RETRYING')
-    return (
-      <small className="trace-detail">
-        Reason: {payload.reason} · Change: {payload.changed}
-      </small>
-    );
-  if (event.type === 'STEP_COMPLETED' && payload.result !== undefined)
-    return <small className="trace-detail">Result: {JSON.stringify(payload.result)}</small>;
+    return <small className="trace-detail">{payload.reason}</small>;
   return null;
 }
 function collectArtifactPaths(value: unknown) {
