@@ -32,6 +32,7 @@ node_modules
 /test-results
 /.local-agent
 /data/*.db
+/data/sandbox/
 /libpeerconnection.log
 npm-debug.log
 yarn-error.log

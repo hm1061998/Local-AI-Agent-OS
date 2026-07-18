@@ -36,5 +36,29 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ missingCapabilities, runtimeType }),
     }),
+  sandboxExecutions: () => json<any[]>('/sandbox/executions'),
+  sandboxScan: (body: unknown) =>
+    json<any>('/sandbox/scan', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  sandboxGenerate: (description: string, runtime: 'typescript' | 'python') =>
+    json<any>('/sandbox/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ description, runtime }),
+    }),
+  sandboxApprove: (id: string) => json(`/sandbox/executions/${id}/approve`, { method: 'POST' }),
+  sandboxReject: (id: string) => json(`/sandbox/executions/${id}/reject`, { method: 'POST' }),
+  sandboxRun: (id: string, input: unknown) =>
+    json(`/sandbox/executions/${id}/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ input }),
+    }),
+  sandboxKill: (id: string) => json(`/sandbox/executions/${id}/kill`, { method: 'POST' }),
+  sandboxApply: (id: string) => json(`/sandbox/executions/${id}/apply`, { method: 'POST' }),
+  sandboxRollback: (id: string) => json(`/sandbox/executions/${id}/rollback`, { method: 'POST' }),
 };
 export const socket = io('/agent', { path: '/socket.io' });

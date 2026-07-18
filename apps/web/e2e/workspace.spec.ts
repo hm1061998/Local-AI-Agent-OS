@@ -149,3 +149,101 @@ test('task waiting for a generated skill links to approval center', async ({ pag
     '/approvals',
   );
 });
+
+test('sandbox review exposes findings and kill control', async ({ page }) => {
+  await page.route('**/api/sandbox/executions', (route) =>
+    route.fulfill({
+      json: [
+        {
+          id: 'exec-1',
+          skillId: 'test-generator',
+          runtime: 'typescript',
+          status: 'running',
+          findings: [{ rule: 'TS_RAW_FS', severity: 'high' }],
+          stdout: 'tests passed',
+        },
+      ],
+    }),
+  );
+  await page.route('**/api/sandbox/executions/exec-1/kill', (route) =>
+    route.fulfill({ json: { accepted: true } }),
+  );
+  await page.goto('/sandbox');
+  await expect(page.getByRole('heading', { name: 'Executable Sandbox' })).toBeVisible();
+  await expect(page.getByText('TS_RAW_FS')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Kill sandbox' })).toBeVisible();
+});
+
+test('sandbox UI scans, approves, runs, and displays persisted output', async ({ page }) => {
+  let status = 'waiting_for_approval';
+  let output: unknown;
+  const execution = () => ({
+    id: 'exec-demo',
+    skillId: 'hello-sandbox',
+    runtime: 'typescript',
+    status,
+    findings: [],
+    output,
+  });
+  await page.route('**/api/sandbox/executions', (route) =>
+    route.fulfill({ json: status === 'none' ? [] : [execution()] }),
+  );
+  await page.route('**/api/sandbox/scan', (route) => {
+    status = 'waiting_for_approval';
+    return route.fulfill({ json: execution() });
+  });
+  await page.route('**/api/sandbox/executions/exec-demo/approve', (route) => {
+    status = 'approved';
+    return route.fulfill({ json: { accepted: true } });
+  });
+  await page.route('**/api/sandbox/executions/exec-demo/run', (route) => {
+    status = 'completed';
+    output = { message: 'Hello Minh', input: { name: 'Minh' } };
+    return route.fulfill({ json: { status, output } });
+  });
+  status = 'none';
+  await page.goto('/sandbox');
+  await page.getByRole('button', { name: 'Scan package' }).click();
+  await expect(page.getByRole('button', { name: 'Approve version' })).toBeVisible();
+  await page.getByRole('button', { name: 'Approve version' }).click();
+  await expect(page.getByRole('button', { name: 'Run sandbox' })).toBeVisible();
+  await page.getByRole('button', { name: 'Run sandbox' }).click();
+  await expect(page.getByTestId('sandbox-output')).toContainText('Hello Minh');
+});
+
+test('sandbox UI previews, applies, and rolls back staged files', async ({ page }) => {
+  let status = 'waiting_for_changes_approval';
+  const staged = [
+    {
+      path: 'tests/generated.test.ts',
+      kind: 'create',
+      before: null,
+      after: 'test("generated",()=>expect(true).toBe(true))',
+    },
+  ];
+  const execution = () => ({
+    id: 'exec-diff',
+    skillId: 'test-generator',
+    runtime: 'typescript',
+    status,
+    findings: [],
+    output: { files: { 'tests/generated.test.ts': staged[0].after } },
+    staged,
+    applied: status === 'changes_applied' ? staged : undefined,
+  });
+  await page.route('**/api/sandbox/executions', (route) => route.fulfill({ json: [execution()] }));
+  await page.route('**/api/sandbox/executions/exec-diff/apply', (route) => {
+    status = 'changes_applied';
+    return route.fulfill({ json: { applied: staged } });
+  });
+  await page.route('**/api/sandbox/executions/exec-diff/rollback', (route) => {
+    status = 'changes_rolled_back';
+    return route.fulfill({ json: { rolledBack: true } });
+  });
+  await page.goto('/sandbox');
+  await expect(page.getByText('Staged diff')).toBeVisible();
+  await page.getByRole('button', { name: 'Apply approved changes' }).click();
+  await expect(page.getByRole('button', { name: 'Rollback changes' })).toBeVisible();
+  await page.getByRole('button', { name: 'Rollback changes' }).click();
+  await expect(page.getByText('changes_rolled_back')).toBeVisible();
+});

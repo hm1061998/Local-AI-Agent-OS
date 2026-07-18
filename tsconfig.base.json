@@ -17,6 +17,8 @@
       "@local-agent/skill-schema": ["packages/skill-schema/src/index.ts"],
       "@local-agent/shared-types": ["packages/shared-types/src/index.ts"],
       "@local-agent/test-utils": ["packages/test-utils/src/index.ts"]
+      ,"@local-agent/sandbox-sdk": ["packages/sandbox-sdk/src/index.ts"]
+      ,"@local-agent/sandbox-runner": ["apps/sandbox-runner/src/index.ts"]
     }
   }
 }

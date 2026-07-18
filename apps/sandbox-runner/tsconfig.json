@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "../../dist/apps/sandbox-runner",
+    "rootDir": "../..",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "../../packages/sandbox-sdk/src/**/*.ts"]
+}

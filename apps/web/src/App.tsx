@@ -16,6 +16,7 @@ function Layout({ children }: { children: ReactNode }) {
           <Link to="/workspace">Workspace</Link>
           <Link to="/skills">Skills</Link>
           <Link to="/approvals">Approvals</Link>
+          <Link to="/sandbox">Sandbox</Link>
           <Link to="/settings/models">Models</Link>
         </nav>
       </header>
@@ -291,6 +292,221 @@ function Approvals() {
   );
 }
 
+function Sandbox() {
+  const [runtime, setRuntime] = useState<'typescript' | 'python'>('typescript');
+  const [skillId, setSkillId] = useState('hello-sandbox');
+  const [input, setInput] = useState('{"name":"Minh"}');
+  const [source, setSource] = useState(
+    "exports.run = async (input) => ({ message: `Hello ${input.name ?? 'world'}`, input });",
+  );
+  const [error, setError] = useState('');
+  const [description, setDescription] = useState('Create a structured greeting from input.name');
+  const { data = [], refetch } = useQuery({
+    queryKey: ['sandbox-executions'],
+    queryFn: api.sandboxExecutions,
+    refetchInterval: 2000,
+  });
+  const changeRuntime = (value: 'typescript' | 'python') => {
+    setRuntime(value);
+    setSource(
+      value === 'typescript'
+        ? "exports.run = async (input) => ({ message: `Hello ${input.name ?? 'world'}`, input });"
+        : "def run(input):\n    return {'message': f\"Hello {input.get('name', 'world')}\", 'input': input}",
+    );
+  };
+  const scan = async () => {
+    try {
+      setError('');
+      const file = runtime === 'typescript' ? 'dist/index.js' : 'src/skill.py';
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+      const checksum = Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, '0'),
+      ).join('');
+      await api.sandboxScan({
+        skillId,
+        package: {
+          runtime,
+          files: { [file]: source },
+          dependencies: {},
+          lockfile: '# locked by Local Agent OS',
+          checksums: { [file]: checksum },
+          outputSchema: { type: 'object', required: ['message'] },
+        },
+      });
+      await refetch();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  const parsedInput = () => {
+    try {
+      return JSON.parse(input);
+    } catch {
+      throw new Error('Input phải là JSON hợp lệ');
+    }
+  };
+  const generate = async () => {
+    try {
+      setError('');
+      await api.sandboxGenerate(description, runtime);
+      await refetch();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  return (
+    <Layout>
+      <main>
+        <h1>Executable Sandbox</h1>
+        <p className="muted">
+          Network is disabled by default. Source and findings must be approved before container
+          execution.
+        </p>
+        <section className="card sandbox-builder">
+          <h2>Test an executable skill</h2>
+          <label>
+            AI generation request
+            <input value={description} onChange={(event) => setDescription(event.target.value)} />
+          </label>
+          <button className="secondary" onClick={() => void generate()}>
+            Generate and scan with AI
+          </button>
+          <label>
+            Skill ID
+            <input value={skillId} onChange={(event) => setSkillId(event.target.value)} />
+          </label>
+          <label>
+            Runtime
+            <select
+              value={runtime}
+              onChange={(event) => changeRuntime(event.target.value as 'typescript' | 'python')}
+            >
+              <option value="typescript">TypeScript / JavaScript</option>
+              <option value="python">Python</option>
+            </select>
+          </label>
+          <label>
+            Skill source
+            <textarea
+              aria-label="Skill source"
+              value={source}
+              onChange={(event) => setSource(event.target.value)}
+            />
+          </label>
+          <label>
+            Input JSON
+            <textarea
+              aria-label="Sandbox input"
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+            />
+          </label>
+          {error && <pre className="error">{error}</pre>}
+          <button onClick={() => void scan()}>Scan package</button>
+        </section>
+        <div className="tasks">
+          {data.map((item) => (
+            <div className="card" key={item.id}>
+              <h2>{item.skillId}</h2>
+              <p>
+                <span className="pill">{item.status}</span> · {item.runtime}
+              </p>
+              <h3>Static analysis findings</h3>
+              <pre>{JSON.stringify(item.findings, null, 2)}</pre>
+              <div className="actions">
+                {item.status === 'waiting_for_approval' && (
+                  <>
+                    <button onClick={() => void api.sandboxApprove(item.id).then(() => refetch())}>
+                      Approve version
+                    </button>
+                    <button
+                      className="secondary"
+                      onClick={() => void api.sandboxReject(item.id).then(() => refetch())}
+                    >
+                      Reject
+                    </button>
+                  </>
+                )}
+                {item.status === 'approved' && (
+                  <button
+                    onClick={() => {
+                      try {
+                        void api
+                          .sandboxRun(item.id, parsedInput())
+                          .then(() => refetch())
+                          .catch((reason) => setError(String(reason)));
+                      } catch (reason) {
+                        setError(reason instanceof Error ? reason.message : String(reason));
+                      }
+                    }}
+                  >
+                    Run sandbox
+                  </button>
+                )}
+                {item.status === 'running' && (
+                  <button
+                    className="secondary"
+                    onClick={() => void api.sandboxKill(item.id).then(() => refetch())}
+                  >
+                    Kill sandbox
+                  </button>
+                )}
+              </div>
+              {item.output !== undefined && (
+                <>
+                  <h3>Output</h3>
+                  <pre data-testid="sandbox-output">{JSON.stringify(item.output, null, 2)}</pre>
+                </>
+              )}
+              {item.staged && (
+                <>
+                  <h3>Staged diff</h3>
+                  {item.staged.map((change: any) => (
+                    <div className="diff" key={change.path}>
+                      <b>
+                        {change.kind}: {change.path}
+                      </b>
+                      <pre>
+                        - {change.before ?? '(new file)'}
+                        {`\n`}+ {change.after}
+                      </pre>
+                    </div>
+                  ))}
+                  {item.status === 'waiting_for_changes_approval' && (
+                    <button onClick={() => void api.sandboxApply(item.id).then(() => refetch())}>
+                      Apply approved changes
+                    </button>
+                  )}
+                </>
+              )}
+              {item.status === 'changes_applied' && (
+                <button
+                  className="secondary"
+                  onClick={() => void api.sandboxRollback(item.id).then(() => refetch())}
+                >
+                  Rollback changes
+                </button>
+              )}
+              {item.stdout && (
+                <>
+                  <h3>stdout</h3>
+                  <pre>{item.stdout}</pre>
+                </>
+              )}
+              {item.stderr && (
+                <>
+                  <h3>stderr</h3>
+                  <pre>{item.stderr}</pre>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      </main>
+    </Layout>
+  );
+}
+
 export function App() {
   return (
     <Routes>
@@ -299,6 +515,7 @@ export function App() {
       <Route path="/skills" element={<Skills />} />
       <Route path="/skills/:skillId" element={<SkillDetail />} />
       <Route path="/approvals" element={<Approvals />} />
+      <Route path="/sandbox" element={<Sandbox />} />
       <Route path="/settings/models" element={<Models />} />
       <Route path="*" element={<Workspace />} />
     </Routes>

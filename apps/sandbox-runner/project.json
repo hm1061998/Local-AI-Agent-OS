@@ -1,0 +1,23 @@
+{
+  "name": "sandbox-runner",
+  "sourceRoot": "apps/sandbox-runner/src",
+  "projectType": "application",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsc -p apps/sandbox-runner/tsconfig.json" }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsc -p apps/sandbox-runner/tsconfig.json --noEmit" }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": { "command": "eslint apps/sandbox-runner/src apps/sandbox-runner/test" }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": { "command": "vitest run --config apps/sandbox-runner/vitest.config.ts" }
+    }
+  }
+}

@@ -56,6 +56,37 @@ textarea {
   color: #fff;
   font: inherit;
 }
+.sandbox-builder {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+.sandbox-builder label {
+  display: grid;
+  gap: 8px;
+  font-weight: 700;
+}
+.sandbox-builder input,
+.sandbox-builder select {
+  padding: 12px;
+  border: 1px solid #29464b;
+  border-radius: 10px;
+  background: #0d1b1e;
+  color: #fff;
+  font: inherit;
+}
+.sandbox-builder textarea {
+  min-height: 100px;
+  font-family: ui-monospace, monospace;
+}
+.error {
+  color: #ff8b7d;
+  white-space: pre-wrap;
+}
+pre {
+  overflow: auto;
+  white-space: pre-wrap;
+}
 .status,
 .card,
 .response,

@@ -24,6 +24,13 @@ export class AgentDatabase {
     this.addColumn('skills', 'status', "TEXT NOT NULL DEFAULT 'active'");
     this.addColumn('skills', 'created_by', "TEXT NOT NULL DEFAULT 'system'");
     this.addColumn('skill_approvals', 'task_id', 'TEXT');
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS sandbox_executions(id TEXT PRIMARY KEY,task_id TEXT,skill_id TEXT NOT NULL,runtime TEXT NOT NULL,status TEXT NOT NULL,findings_json TEXT NOT NULL,stdout TEXT,stderr TEXT,container_id TEXT,resource_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);`,
+    );
+    this.addColumn('sandbox_executions', 'package_json', 'TEXT');
+    this.addColumn('sandbox_executions', 'output_json', 'TEXT');
+    this.addColumn('sandbox_executions', 'staged_json', 'TEXT');
+    this.addColumn('sandbox_executions', 'applied_json', 'TEXT');
   }
   private addColumn(table: string, column: string, definition: string) {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -190,5 +197,102 @@ export class AgentDatabase {
     this.db
       .prepare('UPDATE skills SET status=?,updated_at=? WHERE id=?')
       .run(status, new Date().toISOString(), id);
+  }
+  createSandboxExecution(input: {
+    skillId: string;
+    runtime: string;
+    findings: unknown;
+    package?: unknown;
+    taskId?: string;
+  }) {
+    const id = crypto.randomUUID(),
+      now = new Date().toISOString();
+    this.db
+      .prepare(
+        'INSERT INTO sandbox_executions(id,task_id,skill_id,runtime,status,findings_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        id,
+        input.taskId ?? null,
+        input.skillId,
+        input.runtime,
+        'waiting_for_approval',
+        JSON.stringify(input.findings),
+        now,
+        now,
+      );
+    if (input.package)
+      this.db
+        .prepare('UPDATE sandbox_executions SET package_json=? WHERE id=?')
+        .run(JSON.stringify(input.package), id);
+    this.audit('SANDBOX_SCAN_COMPLETED', 'sandbox_execution', id, input);
+    return { id, ...input, status: 'waiting_for_approval', createdAt: now, updatedAt: now };
+  }
+  sandboxExecutions() {
+    return (
+      this.db
+        .prepare(
+          'SELECT id,task_id taskId,skill_id skillId,runtime,status,findings_json findings,package_json package,output_json output,staged_json staged,applied_json applied,stdout,stderr,container_id containerId,resource_json resources,created_at createdAt,updated_at updatedAt FROM sandbox_executions ORDER BY created_at DESC',
+        )
+        .all() as any[]
+    ).map((row) => ({
+      ...row,
+      findings: JSON.parse(row.findings),
+      ...(row.package ? { package: JSON.parse(row.package) } : {}),
+      ...(row.output ? { output: JSON.parse(row.output) } : {}),
+      ...(row.staged ? { staged: JSON.parse(row.staged) } : {}),
+      ...(row.applied ? { applied: JSON.parse(row.applied) } : {}),
+      ...(row.resources ? { resources: JSON.parse(row.resources) } : {}),
+    }));
+  }
+  setSandboxStatus(
+    id: string,
+    status: string,
+    patch: {
+      stdout?: string;
+      stderr?: string;
+      resources?: unknown;
+      output?: unknown;
+      staged?: unknown;
+      applied?: unknown;
+    } = {},
+  ) {
+    this.db
+      .prepare(
+        'UPDATE sandbox_executions SET status=?,stdout=COALESCE(?,stdout),stderr=COALESCE(?,stderr),resource_json=COALESCE(?,resource_json),output_json=COALESCE(?,output_json),staged_json=COALESCE(?,staged_json),applied_json=COALESCE(?,applied_json),updated_at=? WHERE id=?',
+      )
+      .run(
+        status,
+        patch.stdout ?? null,
+        patch.stderr ?? null,
+        patch.resources ? JSON.stringify(patch.resources) : null,
+        patch.output === undefined ? null : JSON.stringify(patch.output),
+        patch.staged === undefined ? null : JSON.stringify(patch.staged),
+        patch.applied === undefined ? null : JSON.stringify(patch.applied),
+        new Date().toISOString(),
+        id,
+      );
+    this.audit(`SANDBOX_${status.toUpperCase()}`, 'sandbox_execution', id, patch);
+  }
+  audit(action: string, entityType: string, entityId: string, details: unknown) {
+    this.db
+      .prepare(
+        'INSERT INTO audit_logs(id,action,entity_type,entity_id,details_json,created_at) VALUES(?,?,?,?,?,?)',
+      )
+      .run(
+        crypto.randomUUID(),
+        action,
+        entityType,
+        entityId,
+        JSON.stringify(details),
+        new Date().toISOString(),
+      );
+  }
+  auditLogs() {
+    return this.db
+      .prepare(
+        'SELECT id,action,entity_type entityType,entity_id entityId,details_json details,created_at createdAt FROM audit_logs ORDER BY created_at DESC',
+      )
+      .all();
   }
 }
