@@ -1,96 +1,78 @@
-# LocalAiAgentOs
+# Local Agent OS — Phase 1 Web
 
-<a alt="Nx logo" href="https://nx.dev" target="_blank" rel="noreferrer"><img src="https://raw.githubusercontent.com/nrwl/nx/master/images/nx-logo.png" width="45"></a>
+Local-first AI agent with a React web interface, NestJS API, SQLite, and DeepSeek through Ollama. Phase 1 includes structured task analysis, six static skills, a bounded FSM orchestrator, persisted operational events, cancellation, and a live execution timeline. It does not generate executable skills.
 
-✨ Your new, shiny [Nx workspace](https://nx.dev) is ready ✨.
+## Requirements
 
-[Learn more about this workspace setup and its capabilities](https://nx.dev/getting-started/intro#learn-nx?utm_source=nx_project&amp;utm_medium=readme&amp;utm_campaign=nx_projects) or run `npx nx graph` to visually explore what was created. Now, let's get you up to speed!
+- Node.js 22 (pinned to `22.22.2` in `.nvmrc`)
+- Yarn 1.22
+- [Ollama](https://ollama.com/download/windows)
+- A modern browser such as Chrome, Edge, or Firefox
 
-## Run tasks
+Rust, Tauri, Visual Studio Build Tools, and native desktop packaging are not required.
 
-To run tasks with Nx use:
+## Setup
 
-```sh
-npx nx <target> <project-name>
+```powershell
+ollama pull deepseek-r1
+ollama pull nomic-embed-text
+Copy-Item .env.example .env
+yarn install
+yarn playwright install chromium
 ```
 
-For example:
+Set `AGENT_WORKSPACE` in `.env` to the only directory skills may access.
 
-```sh
-npx nx build myproject
+## Run
+
+Start the API:
+
+```powershell
+yarn dev:api
 ```
 
-These targets are either [inferred automatically](https://nx.dev/concepts/inferred-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) or defined in the `project.json` or `package.json` files.
+Start the web application in another terminal:
 
-[More about running tasks in the docs &raquo;](https://nx.dev/features/run-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-## Add new projects
-
-While you could add new projects to your workspace manually, you might want to leverage [Nx plugins](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) and their [code generation](https://nx.dev/features/generate-code?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) feature.
-
-To install a new plugin you can use the `nx add` command. Here's an example of adding the React plugin:
-```sh
-npx nx add @nx/react
+```powershell
+yarn dev:web
 ```
 
-Use the plugin's generator to create new projects. For example, to create a new React app or library:
+Open [http://127.0.0.1:4200](http://127.0.0.1:4200) in your browser.
 
-```sh
-# Generate an app
-npx nx g @nx/react:app demo
+## Verify
 
-# Generate a library
-npx nx g @nx/react:lib some-lib
+```powershell
+yarn lint
+yarn typecheck
+yarn test
+yarn build
+yarn e2e
 ```
 
-You can use `npx nx list` to get a list of installed plugins. Then, run `npx nx list <plugin-name>` to learn about more specific capabilities of a particular plugin. Alternatively, [install Nx Console](https://nx.dev/getting-started/editor-setup?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) to browse plugins and generators in your IDE.
+REST exposes health, model health, skills, task CRUD/cancel, and task events. Socket.IO uses namespace `/agent`. See [architecture](docs/architecture.md).
 
-[Learn more about Nx plugins &raquo;](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) | [Browse the plugin registry &raquo;](https://nx.dev/plugin-registry?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+## Phase 1 acceptance checklist
 
-## Set up CI!
+1. Start Ollama and verify `Invoke-RestMethod http://127.0.0.1:11434/api/tags` lists `deepseek-r1` and `nomic-embed-text`.
+2. Run `yarn dev:api` and verify `Invoke-RestMethod http://127.0.0.1:3000/models/health` reports `chatModelAvailable: true`.
+3. Run `yarn dev:web`, open the browser, submit a reporting or filesystem task, and confirm it reaches `completed` with persisted timeline events.
+4. Run all verification commands above.
 
-### Step 1
+Ollama is the only remaining machine-level prerequisite and is intentionally not installed or managed by the application.
 
-To connect to Nx Cloud, run the following command:
+## Native dependency troubleshooting
 
-```sh
-npx nx connect
+`better-sqlite3` must be compiled with the same Node major version that runs the API. Confirm the active runtime before installing:
+
+```powershell
+node --version
+node -p "process.versions.modules"
+yarn install
 ```
 
-Connecting to Nx Cloud ensures a [fast and scalable CI](https://nx.dev/ci/intro/why-nx-cloud?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) pipeline. It includes features such as:
+This repository expects ABI `127` from Node 22. If Node reports another ABI, switch to Node 22 and rebuild dependencies:
 
-- [Remote caching](https://nx.dev/ci/features/remote-cache?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Task distribution across multiple machines](https://nx.dev/ci/features/distribute-task-execution?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Automated e2e test splitting](https://nx.dev/ci/features/split-e2e-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Task flakiness detection and rerunning](https://nx.dev/ci/features/flaky-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-### Step 2
-
-Use the following command to configure a CI workflow for your workspace:
-
-```sh
-npx nx g ci-workflow
+```powershell
+nvm use 22.22.2
+yarn install --force
 ```
-
-[Learn more about Nx on CI](https://nx.dev/ci/intro/ci-with-nx#ready-get-started-with-your-provider?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-## Install Nx Console
-
-Nx Console is an editor extension that enriches your developer experience. It lets you run tasks, generate code, and improves code autocompletion in your IDE. It is available for VSCode and IntelliJ.
-
-[Install Nx Console &raquo;](https://nx.dev/getting-started/editor-setup?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-## Useful links
-
-Learn more:
-
-- [Learn more about this workspace setup](https://nx.dev/getting-started/intro#learn-nx?utm_source=nx_project&amp;utm_medium=readme&amp;utm_campaign=nx_projects)
-- [Learn about Nx on CI](https://nx.dev/ci/intro/ci-with-nx?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Releasing Packages with Nx release](https://nx.dev/features/manage-releases?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [What are Nx plugins?](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-And join the Nx community:
-- [Discord](https://go.nx.dev/community)
-- [Follow us on X](https://twitter.com/nxdevtools) or [LinkedIn](https://www.linkedin.com/company/nrwl)
-- [Our Youtube channel](https://www.youtube.com/@nxdevtools)
-- [Our blog](https://nx.dev/blog?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
