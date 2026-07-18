@@ -42,10 +42,32 @@ const nonRecoverableSkillErrors = new Set([
   'BUDGET_EXCEEDED',
   'OLLAMA_UNAVAILABLE',
   'MODEL_NOT_FOUND',
+  'EXECUTION_TIMEOUT',
 ]);
 
 export function isRecoverableSkillFailure(reason: string) {
   return !nonRecoverableSkillErrors.has(reason);
+}
+
+export async function withExecutionTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  parentSignal: AbortSignal,
+  timeoutMs: number,
+) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(parentSignal.reason);
+  if (parentSignal.aborted) abortFromParent();
+  else parentSignal.addEventListener('abort', abortFromParent, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error('EXECUTION_TIMEOUT')), timeoutMs);
+  try {
+    return await operation(controller.signal);
+  } catch (error) {
+    if (controller.signal.aborted && !parentSignal.aborted) throw new Error('EXECUTION_TIMEOUT');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    parentSignal.removeEventListener('abort', abortFromParent);
+  }
 }
 
 export class BudgetGuard {
@@ -300,23 +322,23 @@ export class Orchestrator extends EventEmitter {
       let plan;
       if (selectedSkills.length > 1) {
         plan = {
-          goal: analysis.intent,
-          steps: selectedSkills.map((skill, index) => ({
-            id: `step-${index + 1}`,
-            order: index + 1,
-            title: skill.name,
-            description:
-              index === 0
-                ? `Thu thập dữ liệu bằng ${skill.name}`
-                : `Dùng kết quả bước ${index} làm đầu vào cho ${skill.name}`,
-            skillId: skill.id,
-            input:
-              skill.id === 'filesystem-reader'
-                ? { path: inferFilesystemPath(input) }
-                : { request: input, inputFromStep: `step-${index}` },
-            expectedOutput: `Hoàn thành mục tiêu ${analysis.objectives[index] ?? index + 1}`,
-            risk: skill.manifest.riskLevel === 'low' ? ('low' as const) : ('medium' as const),
-          })),
+          goal: input,
+          steps: selectedSkills.map((skill, index) => {
+            const wording = friendlyStepWording(skill, index, input);
+            return {
+              id: `step-${index + 1}`,
+              order: index + 1,
+              title: wording.title,
+              description: wording.description,
+              skillId: skill.id,
+              input:
+                skill.id === 'filesystem-reader'
+                  ? { path: inferFilesystemPath(input) }
+                  : { request: input, inputFromStep: `step-${index}` },
+              expectedOutput: `Hoàn thành mục tiêu ${analysis.objectives[index] ?? index + 1}`,
+              risk: skill.manifest.riskLevel === 'low' ? ('low' as const) : ('medium' as const),
+            };
+          }),
         };
       } else if (selected.manifest.runtime.type === 'prompt') {
         plan = {
@@ -370,6 +392,16 @@ export class Orchestrator extends EventEmitter {
       } else {
         plan = validatePlan(createPlan(analysis, routing, input), budget.maxSteps);
       }
+      plan = {
+        ...plan,
+        goal: input,
+        steps: plan.steps.map((step, index) => {
+          const displaySkill =
+            selectedSkills.find((skill) => skill.id === step.skillId) ?? selected;
+          const wording = friendlyStepWording(displaySkill, index, input);
+          return { ...step, title: wording.title, description: wording.description };
+        }),
+      };
       this.event(id, 'PLAN_GENERATED', state, `Kế hoạch có ${plan.steps.length} bước.`, plan);
       state = this.move(id, state, 'executing', 'EXECUTION_STARTED', 'Bắt đầu thực thi.');
       const results: unknown[] = [];
@@ -393,32 +425,40 @@ export class Orchestrator extends EventEmitter {
             if (stepSkill.manifest.runtime.type === 'prompt') {
               guard.modelCall();
               const upstreamResult = results.at(-1);
-              result = await this.model.generateStructured({
-                prompt: [
-                  `Execute the declarative skill "${stepSkill.name}".`,
-                  `Skill purpose: ${stepSkill.description}.`,
-                  `Required capabilities: ${stepSkill.manifest.capabilities.join(', ')}.`,
-                  `Original user request: ${input}`,
-                  `Current step: ${step.title} — ${step.description}.`,
-                  ...(attempt > 0
-                    ? [
-                        'The previous output was invalid or merely repeated the request. Produce the actual requested result now.',
-                      ]
-                    : []),
-                  ...(upstreamResult === undefined
-                    ? []
-                    : [
-                        `Required upstream result: ${JSON.stringify(upstreamResult)}`,
-                        'Use the upstream content as the source data. Do not translate or repeat the instruction itself.',
-                      ]),
-                  'Return the actual final result in the required "output" field.',
-                  'For translation, output must contain the translated text, not an explanation.',
-                  'For generated files, include their workspace-relative paths in "artifacts".',
-                  'Never return an empty object or placeholder.',
-                ].join('\n'),
-                schema: skillExecutionResultSchema,
-                signal: controller.signal,
-              });
+              result = await withExecutionTimeout(
+                (stepSignal) =>
+                  this.model.generateStructured({
+                    prompt: [
+                      `Execute the declarative skill "${stepSkill.name}".`,
+                      `Skill purpose: ${stepSkill.description}.`,
+                      `Required capabilities: ${stepSkill.manifest.capabilities.join(', ')}.`,
+                      `Original user request: ${input}`,
+                      `Current step: ${step.title} — ${step.description}.`,
+                      ...(attempt > 0
+                        ? [
+                            'The previous output was invalid or merely repeated the request. Produce the actual requested result now.',
+                          ]
+                        : []),
+                      ...(upstreamResult === undefined
+                        ? []
+                        : [
+                            `Required upstream result: ${JSON.stringify(upstreamResult)}`,
+                            'Use the upstream content as the source data. Do not translate or repeat the instruction itself.',
+                          ]),
+                      'Return the actual final result in the required "output" field.',
+                      'For translation, output must contain the translated text, not an explanation.',
+                      'For generated files, include their workspace-relative paths in "artifacts".',
+                      'Never return an empty object or placeholder.',
+                    ].join('\n'),
+                    schema: skillExecutionResultSchema,
+                    signal: stepSignal,
+                  }),
+                controller.signal,
+                Math.min(
+                  budget.maxExecutionTimeMs,
+                  Math.max(90_000, stepSkill.manifest.runtime.timeoutSeconds * 1000),
+                ),
+              );
               const output = (result as { output?: unknown }).output;
               if (typeof output === 'string' && isRequestEcho(input, output))
                 throw new Error('RESULT_ECHOED_REQUEST');
@@ -707,6 +747,40 @@ export function isRequestEcho(request: string, output: string) {
   const expected = normalize(request);
   const actual = normalize(output);
   return actual === expected || (expected.length > 24 && actual.includes(expected));
+}
+
+export function friendlyStepWording(skill: RoutableSkill, index: number, request: string) {
+  const capabilities = new Set(skill.manifest.capabilities.map((value) => value.toLowerCase()));
+  if (capabilities.has('filesystem:read')) {
+    const path = inferFilesystemPath(request);
+    return {
+      title: path === '.' ? 'Đọc nội dung tệp được yêu cầu' : `Đọc nội dung file ${path}`,
+      description:
+        path === '.'
+          ? 'Mở tệp trong workspace và lấy nội dung cần xử lý'
+          : `Mở ${path} trong workspace và lấy toàn bộ nội dung`,
+    };
+  }
+  if (capabilities.has('language:translate')) {
+    const target = request.match(/sang\s+(tiếng\s+[\p{L}-]+)/iu)?.[1] ?? 'ngôn ngữ yêu cầu';
+    return {
+      title: `Dịch nội dung sang ${target}`,
+      description:
+        index > 0
+          ? `Dùng nội dung đã lấy ở bước ${index} để tạo bản dịch hoàn chỉnh`
+          : 'Dịch trực tiếp nội dung người dùng cung cấp',
+    };
+  }
+  if (capabilities.has('language:define'))
+    return {
+      title: 'Giải thích từ hoặc cụm từ',
+      description: 'Trình bày ý nghĩa bằng ngôn ngữ dễ hiểu',
+    };
+  return {
+    title: skill.name.startsWith('generated-') ? 'Xử lý nội dung theo yêu cầu' : skill.name,
+    description:
+      index > 0 ? `Tiếp tục xử lý kết quả từ bước ${index}` : 'Thực hiện phần đầu tiên của yêu cầu',
+  };
 }
 
 export function requiresUserPermission(manifest: SkillManifest) {

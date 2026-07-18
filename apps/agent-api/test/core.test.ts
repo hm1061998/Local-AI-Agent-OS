@@ -16,8 +16,10 @@ import {
   normalizeLanguageTask,
   isRecoverableSkillFailure,
   isRequestEcho,
+  friendlyStepWording,
   requiresUserPermission,
   selectSkillsForCapabilities,
+  withExecutionTimeout,
 } from '../src/orchestrator';
 import {
   allowedCommands,
@@ -83,6 +85,16 @@ describe('multi-objective planning', () => {
     expect(isRequestEcho(request, request)).toBe(true);
     expect(isRequestEcho(request, 'Đây là nội dung README đã được dịch.')).toBe(false);
   });
+  it('describes technical skills in user-friendly language', () => {
+    const request = 'đọc file README.md và dịch nội dung sang tiếng Việt';
+    expect(friendlyStepWording(records[0]!, 0, request)).toMatchObject({
+      title: 'Đọc nội dung file README.md',
+    });
+    expect(friendlyStepWording(records[1]!, 1, request)).toEqual({
+      title: 'Dịch nội dung sang tiếng Việt',
+      description: 'Dùng nội dung đã lấy ở bước 1 để tạo bản dịch hoàn chỉnh',
+    });
+  });
 });
 
 describe('task permission gate', () => {
@@ -120,6 +132,19 @@ describe('adaptive skill recovery', () => {
     expect(isRecoverableSkillFailure('WORKSPACE_ACCESS_DENIED')).toBe(false);
     expect(isRecoverableSkillFailure('TASK_CANCELLED')).toBe(false);
     expect(isRecoverableSkillFailure('BUDGET_EXCEEDED')).toBe(false);
+    expect(isRecoverableSkillFailure('EXECUTION_TIMEOUT')).toBe(false);
+  });
+  it('aborts a model operation that exceeds its deadline', async () => {
+    await expect(
+      withExecutionTimeout(
+        (signal) =>
+          new Promise((_resolve, reject) =>
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+          ),
+        new AbortController().signal,
+        5,
+      ),
+    ).rejects.toThrow('EXECUTION_TIMEOUT');
   });
 });
 
