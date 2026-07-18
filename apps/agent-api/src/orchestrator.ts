@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { AgentEvent, AgentState, ExecutionBudget, TaskAnalysis } from '@local-agent/agent-protocol';
-import type { ModelProvider } from '@local-agent/model-provider';
+import { ModelProviderError, type ModelProvider } from '@local-agent/model-provider';
 import { DEFAULT_BUDGET, taskAnalysisSchema } from '@local-agent/shared-types';
 import { AgentDatabase } from './database';
 import { createPlan, executeSkill, routeSkills, validatePlan } from './skills';
@@ -88,7 +88,11 @@ export class Orchestrator extends EventEmitter {
     for (let attempt = 0; attempt < 2; attempt++) {
       if (signal.aborted) throw new Error('TASK_CANCELLED');
       try { return await this.model.generateStructured({ prompt: `Phân tích task sau và chỉ trả JSON hợp lệ: ${input}`, schema: taskAnalysisSchema, signal }); }
-      catch (error) { if (signal.aborted) throw new Error('TASK_CANCELLED'); last = error; }
+      catch (error) {
+        if (signal.aborted) throw new Error('TASK_CANCELLED');
+        if (error instanceof ModelProviderError) throw error;
+        last = error;
+      }
     }
     if (last instanceof Error && last.message === 'OLLAMA_UNAVAILABLE') throw last;
     throw new Error('STRUCTURED_OUTPUT_INVALID');

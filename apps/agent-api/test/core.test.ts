@@ -1,9 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { taskAnalysisSchema, DEFAULT_BUDGET } from '@local-agent/shared-types';
 import { skillManifestSchema } from '@local-agent/skill-schema';
 import { MockModelProvider } from '@local-agent/test-utils';
 import type { StructuredGenerationRequest } from '@local-agent/model-provider';
-import { OllamaModelProvider } from '@local-agent/model-provider';
+import { ModelProviderError, OllamaModelProvider } from '@local-agent/model-provider';
 import { AgentDatabase } from '../src/database';
 import { BudgetGuard, Orchestrator, assertTransition } from '../src/orchestrator';
 import { allowedCommands, assertAllowedCommand, createPlan, manifests, routeSkills, safePath, validatePlan } from '../src/skills';
@@ -35,4 +35,21 @@ describe('integration', () => {
   it('fails after one structured-output retry', async () => { const db = new AgentDatabase(':memory:'); const task = db.createTask('invalid'); let calls = 0; class InvalidProvider extends MockModelProvider { override async generateStructured<T>(): Promise<T> { calls += 1; throw new Error('invalid json'); } } const orchestrator = new Orchestrator(db, new InvalidProvider()); await orchestrator.run(task.id, task.userInput); expect(calls).toBe(2); expect(db.getTask(task.id)).toMatchObject({ state: 'failed', errorCode: 'STRUCTURED_OUTPUT_INVALID' }); });
   it('normalizes Ollama unavailable', async () => { const db = new AgentDatabase(':memory:'); const task = db.createTask('offline'); class OfflineProvider extends MockModelProvider { override async generateStructured<T>(): Promise<T> { throw new Error('OLLAMA_UNAVAILABLE'); } } await new Orchestrator(db, new OfflineProvider()).run(task.id, task.userInput); expect(db.getTask(task.id)).toMatchObject({ state: 'failed', errorCode: 'OLLAMA_UNAVAILABLE' }); });
   it('reports an unreachable Ollama endpoint', async () => { const provider = new OllamaModelProvider({ baseUrl: 'http://127.0.0.1:1', chatModel: 'deepseek-r1', embedModel: 'nomic-embed-text' }); await expect(provider.healthCheck()).resolves.toMatchObject({ available: false, chatModelAvailable: false }); });
+  it('sends the configured CPU fallback to Ollama', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ response: JSON.stringify(analysis) }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const provider = new OllamaModelProvider({ baseUrl: 'http://ollama.test', chatModel: 'deepseek-r1', embedModel: 'nomic-embed-text', numGpu: 0 });
+      await provider.generateStructured({ prompt: 'analyze', schema: taskAnalysisSchema });
+      const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+      expect(JSON.parse(String(request.body))).toMatchObject({ options: { num_gpu: 0 } });
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it('reports Ollama generation failures separately from connectivity', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{"error":"CUDA error"}', { status: 500 })));
+    try {
+      const provider = new OllamaModelProvider({ baseUrl: 'http://ollama.test', numGpu: 0 });
+      await expect(provider.generateStructured({ prompt: 'analyze', schema: taskAnalysisSchema })).rejects.toMatchObject<ModelProviderError>({ code: 'OLLAMA_GENERATION_FAILED' });
+    } finally { vi.unstubAllGlobals(); }
+  });
 });

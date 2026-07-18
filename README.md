@@ -23,6 +23,8 @@ yarn playwright install chromium
 
 Set `AGENT_WORKSPACE` in `.env` to the only directory skills may access.
 
+`OLLAMA_NUM_GPU=0` is the safe default and runs Ollama inference on CPU. Increase it only after confirming the local CUDA driver and Ollama GPU runner are stable.
+
 ## Run
 
 Start the API:
