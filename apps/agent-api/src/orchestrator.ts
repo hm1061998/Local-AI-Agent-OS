@@ -303,13 +303,23 @@ export class Orchestrator extends EventEmitter {
         confidence: 1,
         missingCapabilities: [],
       };
-      this.event(id, 'SKILL_SELECTED', state, `Đã chọn skill ${selected.name}.`, {
+      const selectedActions = selectedSkills.map(
+        (skill, index) => friendlyStepWording(skill, index, input).title,
+      );
+      const selectionMessage =
+        selectedActions.length === 1
+          ? `Đã chọn kỹ năng: ${selectedActions[0]}.`
+          : `Đã chọn ${selectedActions.length} kỹ năng: ${selectedActions.join(' → ')}.`;
+      this.event(id, 'SKILL_SELECTED', state, selectionMessage, {
         ...routing,
-        registryCount: active.length + (active.some((skill) => skill.id === selected.id) ? 0 : 1),
-        selectedSkills: selectedSkills.map((skill) => ({
+        registryCount: this.db.listSkills().filter((skill) => skill.status === 'active').length,
+        selectedSkills: selectedSkills.map((skill, index) => ({
           id: skill.id,
           name: skill.name,
           runtime: skill.manifest.runtime.type,
+          order: index + 1,
+          action: selectedActions[index],
+          objective: analysis.objectives[index] ?? analysis.intent,
         })),
       });
       state = this.move(
@@ -425,6 +435,10 @@ export class Orchestrator extends EventEmitter {
             if (stepSkill.manifest.runtime.type === 'prompt') {
               guard.modelCall();
               const upstreamResult = results.at(-1);
+              const upstreamText = extractResultText(upstreamResult);
+              const translatesContent = stepSkill.manifest.capabilities.some(
+                (capability) => capability.toLowerCase() === 'language:translate',
+              );
               result = await withExecutionTimeout(
                 (stepSignal) =>
                   this.model.generateStructured({
@@ -443,6 +457,11 @@ export class Orchestrator extends EventEmitter {
                         ? []
                         : [
                             `Required upstream result: ${JSON.stringify(upstreamResult)}`,
+                            ...(translatesContent && upstreamText
+                              ? [
+                                  `Source text that must be translated:\n---SOURCE---\n${upstreamText}\n---END SOURCE---`,
+                                ]
+                              : []),
                             'Use the upstream content as the source data. Do not translate or repeat the instruction itself.',
                           ]),
                       'Return the actual final result in the required "output" field.',
@@ -462,6 +481,13 @@ export class Orchestrator extends EventEmitter {
               const output = (result as { output?: unknown }).output;
               if (typeof output === 'string' && isRequestEcho(input, output))
                 throw new Error('RESULT_ECHOED_REQUEST');
+              if (
+                translatesContent &&
+                upstreamText &&
+                typeof output === 'string' &&
+                isUnchangedTranslation(upstreamText, output)
+              )
+                throw new Error('TRANSLATION_UNCHANGED');
             } else
               result = await executeSkill(
                 step.skillId,
@@ -477,7 +503,11 @@ export class Orchestrator extends EventEmitter {
               attempt,
               reason: message,
             });
-            if (attempt === 0 && isRecoverableSkillFailure(message)) {
+            if (
+              attempt === 0 &&
+              stepSkill.manifest.runtime.type !== 'prompt' &&
+              isRecoverableSkillFailure(message)
+            ) {
               try {
                 result = await this.recoverWithGeneratedSkill({
                   taskId: id,
@@ -747,6 +777,28 @@ export function isRequestEcho(request: string, output: string) {
   const expected = normalize(request);
   const actual = normalize(output);
   return actual === expected || (expected.length > 24 && actual.includes(expected));
+}
+
+function normalizedText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+export function extractResultText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() || undefined;
+  if (!value || typeof value !== 'object') return undefined;
+  const object = value as Record<string, unknown>;
+  for (const key of ['content', 'text', 'output', 'translatedText', 'translation']) {
+    if (typeof object[key] === 'string' && object[key].trim()) return object[key].trim();
+  }
+  return undefined;
+}
+
+export function isUnchangedTranslation(source: string, output: string) {
+  const normalizedSource = normalizedText(source);
+  return Boolean(normalizedSource) && normalizedSource === normalizedText(output);
 }
 
 export function friendlyStepWording(skill: RoutableSkill, index: number, request: string) {

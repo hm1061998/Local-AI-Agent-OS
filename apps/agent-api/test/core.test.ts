@@ -16,6 +16,8 @@ import {
   normalizeLanguageTask,
   isRecoverableSkillFailure,
   isRequestEcho,
+  isUnchangedTranslation,
+  extractResultText,
   friendlyStepWording,
   requiresUserPermission,
   selectSkillsForCapabilities,
@@ -84,6 +86,17 @@ describe('multi-objective planning', () => {
     const request = 'đọc file README.md và dịch nội dung sang tiếng Việt';
     expect(isRequestEcho(request, request)).toBe(true);
     expect(isRequestEcho(request, 'Đây là nội dung README đã được dịch.')).toBe(false);
+  });
+  it('rejects a translation that is identical to the source step', () => {
+    const source = { content: 'Local-first AI agent with a React web interface' };
+    expect(extractResultText(source)).toBe(source.content);
+    expect(isUnchangedTranslation(extractResultText(source)!, source.content)).toBe(true);
+    expect(
+      isUnchangedTranslation(
+        source.content,
+        'Tác nhân AI ưu tiên chạy cục bộ với giao diện web React',
+      ),
+    ).toBe(false);
   });
   it('describes technical skills in user-friendly language', () => {
     const request = 'đọc file README.md và dịch nội dung sang tiếng Việt';
