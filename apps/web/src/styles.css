@@ -167,3 +167,167 @@ small,
     display: none;
   }
 }
+.universe-page {
+  max-width: none;
+  padding: 18px 2vw;
+}
+.universe-top,
+.universe-bottom,
+.replay-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #0d1b1e;
+  padding: 12px;
+  border: 1px solid #1e373b;
+  border-radius: 12px;
+}
+.universe-top input,
+.universe-bottom input,
+.universe-top select,
+.replay-controls select,
+input,
+select {
+  background: #0d1b1e;
+  color: #fff;
+  border: 1px solid #29464b;
+  border-radius: 8px;
+  padding: 10px;
+}
+.universe-main {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 14px;
+  height: 68vh;
+  margin: 14px 0;
+}
+.scene {
+  position: relative;
+  min-height: 480px;
+  background: radial-gradient(circle, #153239, #071013 70%);
+  border: 1px solid #1e373b;
+  border-radius: 16px;
+  overflow: hidden;
+}
+.inspector {
+  overflow: auto;
+}
+.node-label {
+  padding: 5px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+  background: #102226dd;
+  color: #fff;
+  border: 1px solid #41636a;
+}
+.node-label.selected,
+.graph-node.selected {
+  outline: 3px solid #ffd166;
+}
+.skill-drawer {
+  position: absolute;
+  right: 345px;
+  top: 12px;
+  width: 280px;
+  z-index: 5;
+  display: grid;
+  gap: 12px;
+}
+.graph-2d {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+  padding: 24px;
+  overflow: auto;
+  height: 100%;
+}
+.graph-node {
+  display: grid;
+  text-align: left;
+  gap: 6px;
+  background: #102226;
+  color: #fff;
+  border: 1px solid #31565d;
+}
+.graph-node.active {
+  border: 3px double #ffd166;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  padding: 10px;
+  border-bottom: 1px solid #29464b;
+  text-align: left;
+}
+.inspect-grid,
+.workflow-editor {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+.workflow-editor aside,
+.workflow-canvas {
+  min-height: 360px;
+  padding: 18px;
+  border: 1px solid #29464b;
+  border-radius: 14px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+.workflow-step,
+.diff {
+  padding: 12px;
+  border: 1px solid #31565d;
+  border-radius: 10px;
+  display: grid;
+  gap: 8px;
+}
+.replay-controls {
+  margin: 18px 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+@media (max-width: 900px) {
+  .universe-main,
+  .inspect-grid,
+  .workflow-editor {
+    grid-template-columns: 1fr;
+  }
+  .universe-main {
+    height: auto;
+  }
+  .scene {
+    height: 520px;
+  }
+  .skill-drawer {
+    position: static;
+    width: auto;
+  }
+  .inspector {
+    max-height: 320px;
+  }
+}

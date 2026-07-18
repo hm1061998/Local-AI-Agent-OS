@@ -60,5 +60,12 @@ export const api = {
   sandboxKill: (id: string) => json(`/sandbox/executions/${id}/kill`, { method: 'POST' }),
   sandboxApply: (id: string) => json(`/sandbox/executions/${id}/apply`, { method: 'POST' }),
   sandboxRollback: (id: string) => json(`/sandbox/executions/${id}/rollback`, { method: 'POST' }),
+  telemetry: () => json<any>('/telemetry'),
+  saveWorkflow: (definition: unknown) =>
+    json<any>('/workflows', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ definition }),
+    }),
 };
 export const socket = io('/agent', { path: '/socket.io' });

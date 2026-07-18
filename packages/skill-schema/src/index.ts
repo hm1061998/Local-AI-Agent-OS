@@ -27,6 +27,7 @@ export const skillManifestSchema = z.object({
   riskLevel: z.enum(['low', 'medium', 'high', 'forbidden']),
   approvalRequired: z.boolean(),
   capabilities: z.array(z.string()).default([]),
+  definition: z.unknown().optional(),
 });
 export type SkillManifest = z.infer<typeof skillManifestSchema>;
 export const skillStatuses = [

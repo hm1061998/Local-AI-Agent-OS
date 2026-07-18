@@ -247,3 +247,106 @@ test('sandbox UI previews, applies, and rolls back staged files', async ({ page 
   await page.getByRole('button', { name: 'Rollback changes' }).click();
   await expect(page.getByText('changes_rolled_back')).toBeVisible();
 });
+
+test('universe renders registry, falls back to 2D, searches and disables a skill', async ({
+  page,
+}) => {
+  let disabled = false;
+  const skill = {
+    id: 'code-analyzer',
+    name: 'Code Analyzer',
+    status: 'active',
+    usageCount: 8,
+    successRate: 0.9,
+    createdBy: 'system',
+    manifest: { runtime: { type: 'typescript' }, riskLevel: 'low' },
+  };
+  await page.route('**/api/skills', (route) => route.fulfill({ json: [skill] }));
+  await page.route('**/api/telemetry', (route) =>
+    route.fulfill({
+      json: {
+        cpu: { load: 1 },
+        ram: { used: 50, total: 100 },
+        gpu: { available: false },
+        ollama: { chatModel: 'deepseek-r1' },
+      },
+    }),
+  );
+  await page.route('**/api/skills/code-analyzer/disable', (route) => {
+    disabled = true;
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.goto('/universe');
+  await expect(page.locator('canvas')).toBeVisible();
+  await page.getByRole('button', { name: 'Use 2D' }).click();
+  await expect(page.getByRole('img', { name: /Skill graph/ })).toBeVisible();
+  await page.getByLabel('Search skill').fill('Code');
+  await page.getByRole('button', { name: /Code Analyzer/ }).click();
+  await expect(page.getByRole('heading', { name: 'Code Analyzer' })).toBeVisible();
+  await page.getByRole('button', { name: 'Disable' }).click();
+  await expect.poll(() => disabled).toBe(true);
+});
+
+test('execution inspector replays persisted events without executing skills', async ({ page }) => {
+  await page.route('**/api/tasks/task-1', (route) =>
+    route.fulfill({ json: { ...task, state: 'completed' } }),
+  );
+  await page.route('**/api/tasks/task-1/events', (route) =>
+    route.fulfill({
+      json: [
+        {
+          id: 'a',
+          taskId: 'task-1',
+          type: 'TASK_RECEIVED',
+          state: 'idle',
+          message: 'received',
+          timestamp: now,
+          sequence: 1,
+        },
+        {
+          id: 'b',
+          taskId: 'task-1',
+          type: 'TASK_COMPLETED',
+          state: 'completed',
+          message: 'done',
+          timestamp: now,
+          sequence: 2,
+        },
+      ],
+    }),
+  );
+  await page.route('**/api/sandbox/executions', (route) => route.fulfill({ json: [] }));
+  await page.goto('/tasks/task-1/inspect');
+  await page.getByRole('button', { name: 'Step forward' }).click();
+  await expect(page.getByText('received')).toBeVisible();
+  await page.getByRole('button', { name: 'Step forward' }).click();
+  await expect(page.getByText('done')).toBeVisible();
+  await page.getByRole('button', { name: 'Step backward' }).click();
+  await expect(page.getByText('done')).not.toBeVisible();
+});
+
+test('workflow editor validates and saves a declarative workflow', async ({ page }) => {
+  let saved = false;
+  await page.route('**/api/skills', (route) =>
+    route.fulfill({
+      json: [
+        {
+          id: 'reader',
+          name: 'Reader',
+          status: 'active',
+          manifest: { runtime: { type: 'prompt' } },
+        },
+      ],
+    }),
+  );
+  await page.route('**/api/workflows', (route) => {
+    saved = true;
+    return route.fulfill({ json: { id: 'new-workflow' } });
+  });
+  await page.goto('/workflows/new');
+  await page.getByRole('button', { name: 'Reader' }).click();
+  await page.getByRole('button', { name: 'Dry run' }).click();
+  await expect(page.getByText(/dry run passed/)).toBeVisible();
+  await page.getByRole('button', { name: 'Save workflow' }).click();
+  await expect.poll(() => saved).toBe(true);
+});

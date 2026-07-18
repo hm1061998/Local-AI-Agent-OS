@@ -18,6 +18,7 @@ import { strToU8, unzipSync, zipSync } from 'fflate';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { cpus, freemem, totalmem, loadavg } from 'node:os';
 import { z } from 'zod';
 import { OllamaModelProvider } from '@local-agent/model-provider';
 import {
@@ -45,6 +46,8 @@ import {
   createProposal,
   DefaultSkillRankingStrategy,
   nextVersion,
+  validateWorkflow,
+  aggregatePermissions,
 } from './phase2';
 @Injectable()
 export class RuntimeService {
@@ -397,6 +400,54 @@ export class ApiController {
   }
   @Get('audit-logs') auditLogs() {
     return this.r.db.auditLogs();
+  }
+  @Get('telemetry') async telemetry() {
+    const active = this.r.db.sandboxExecutions().filter((item) => item.status === 'running').length;
+    return {
+      cpu: { cores: cpus().length, load: loadavg()[0] ?? 0 },
+      ram: { used: totalmem() - freemem(), total: totalmem() },
+      gpu: { available: false, message: 'Not available' },
+      activeExecutions: active,
+      queueLength: this.r.db
+        .listTasks()
+        .filter((task) => !['completed', 'failed', 'cancelled'].includes(task.state)).length,
+      ollama: await this.r.model.healthCheck(),
+    };
+  }
+  @Post('workflows') saveWorkflow(@Body() body: { definition?: any }) {
+    if (!body.definition) throw new HttpException('definition is required', 400);
+    const active = new Set(
+      this.r.db
+        .listSkills()
+        .filter((skill) => skill.status === 'active')
+        .map((skill) => skill.id),
+    );
+    validateWorkflow(body.definition, active);
+    const manifest: SkillManifest = {
+      id: body.definition.id,
+      name: body.definition.name,
+      version: '1.0.0',
+      description: body.definition.description,
+      tags: ['workflow'],
+      triggers: ['workflow'],
+      runtime: { type: 'workflow', timeoutSeconds: 60 },
+      inputSchema: { type: 'object' },
+      outputSchema: { type: 'object' },
+      permissions: aggregatePermissions(
+        body.definition.steps
+          .map(
+            (step: any) =>
+              this.r.db.listSkills().find((skill) => skill.id === step.skillId)?.manifest,
+          )
+          .filter(Boolean),
+      ),
+      riskLevel: 'low',
+      approvalRequired: false,
+      capabilities: ['workflow:execute'],
+      definition: body.definition,
+    };
+    this.r.db.installSkill(manifest, 'active', 'user');
+    return manifest;
   }
   @Post('tasks') create(@Body() b: { input?: string }) {
     if (!b.input?.trim()) throw new HttpException('input is required', 400);

@@ -1,9 +1,27 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { AgentEvent } from '@local-agent/agent-protocol';
 import { api, socket } from './api';
 import { useAgentStore } from './store';
+const Universe = lazy(() => import('./Universe').then((module) => ({ default: module.Universe })));
+const ExecutionInspector = lazy(() =>
+  import('./Phase4Panels').then((module) => ({ default: module.ExecutionInspector })),
+);
+const WorkflowEditor = lazy(() =>
+  import('./Phase4Panels').then((module) => ({ default: module.WorkflowEditor })),
+);
+const Deferred = ({ children }: { children: ReactNode }) => (
+  <Suspense
+    fallback={
+      <main>
+        <p>Loading visual tools…</p>
+      </main>
+    }
+  >
+    {children}
+  </Suspense>
+);
 
 function Layout({ children }: { children: ReactNode }) {
   return (
@@ -17,6 +35,8 @@ function Layout({ children }: { children: ReactNode }) {
           <Link to="/skills">Skills</Link>
           <Link to="/approvals">Approvals</Link>
           <Link to="/sandbox">Sandbox</Link>
+          <Link to="/universe">Universe</Link>
+          <Link to="/workflows/new">Workflows</Link>
           <Link to="/settings/models">Models</Link>
         </nav>
       </header>
@@ -516,6 +536,46 @@ export function App() {
       <Route path="/skills/:skillId" element={<SkillDetail />} />
       <Route path="/approvals" element={<Approvals />} />
       <Route path="/sandbox" element={<Sandbox />} />
+      <Route
+        path="/universe"
+        element={
+          <Layout>
+            <Deferred>
+              <Universe />
+            </Deferred>
+          </Layout>
+        }
+      />
+      <Route
+        path="/tasks/:taskId/inspect"
+        element={
+          <Layout>
+            <Deferred>
+              <ExecutionInspector />
+            </Deferred>
+          </Layout>
+        }
+      />
+      <Route
+        path="/workflows/new"
+        element={
+          <Layout>
+            <Deferred>
+              <WorkflowEditor />
+            </Deferred>
+          </Layout>
+        }
+      />
+      <Route
+        path="/workflows/:workflowId"
+        element={
+          <Layout>
+            <Deferred>
+              <WorkflowEditor />
+            </Deferred>
+          </Layout>
+        }
+      />
       <Route path="/settings/models" element={<Models />} />
       <Route path="*" element={<Workspace />} />
     </Routes>
