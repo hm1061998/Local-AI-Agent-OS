@@ -9,6 +9,7 @@ import {
   NotFoundException,
   Param,
   Post,
+  Query,
   Res,
 } from '@nestjs/common';
 import { WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
@@ -107,32 +108,15 @@ export class RuntimeService {
       );
       if (signals.missingExecutableSkill) {
         guard.consume('delegations');
-        bus.send(
-          'supervisor',
+        bus.send('supervisor', 'skill_builder', 'SKILL_BUILD_ASSIGNED', {
+          capability: 'executable-skill',
+          policy: 'auto-install-safe-only',
+        });
+        assign(
           'skill_builder',
-          'SKILL_PROPOSAL_REQUESTED',
-          { capability: 'executable-skill' },
-          plan.id,
+          'Delegated safe skill creation to the runtime; forbidden findings still stop execution.',
         );
-        assign('skill_builder', 'Created a proposal only; activation is prohibited before review.');
-        bus.send('skill_builder', 'supervisor', 'SKILL_PROPOSAL_READY', { status: 'proposal' });
-        guard.consume('delegations');
-        bus.send('supervisor', 'security_reviewer', 'SECURITY_REVIEW_REQUESTED', {
-          risk: signals.risk,
-        });
-        assign('security_reviewer', 'Review requires explicit user approval.');
-        bus.send('security_reviewer', 'supervisor', 'SECURITY_REVIEW_READY', {
-          decision: 'approved_with_conditions',
-          riskLevel: signals.risk,
-          requiresUserApproval: true,
-          findings: [],
-          requiredChanges: [],
-          permissionChanges: {},
-        });
-        this.db.createApproval(createProposal(['executable-skill']), taskId);
-        this.db.updateAgentRun(taskId, 'USER_APPROVAL_REQUIRED', 'supervisor', guard.usage);
-        this.db.audit('MULTI_AGENT_APPROVAL_REQUIRED', 'task', taskId, { signals });
-        return mode;
+        bus.send('skill_builder', 'supervisor', 'SKILL_BUILD_READY', { autoInstall: true });
       }
       guard.consume('delegations');
       bus.send('supervisor', 'executor', 'EXECUTION_ASSIGNED', { approvedPlan: true }, plan.id);
@@ -531,6 +515,15 @@ export class ApiController {
   }
   @Get('audit-logs') auditLogs() {
     return this.r.db.auditLogs();
+  }
+  @Get('artifacts') artifact(@Query('path') path: string, @Res() res: Response) {
+    if (!path) throw new HttpException('path is required', 400);
+    const workspace = resolve(process.env.AGENT_WORKSPACE ?? process.cwd());
+    const target = resolve(workspace, path);
+    const allowedRoots = [resolve(workspace, '.local-agent/output'), resolve(workspace, 'Uploads')];
+    if (!allowedRoots.some((root) => target === root || target.startsWith(`${root}\\`)))
+      throw new HttpException('Artifact path is outside allowed output directories', 403);
+    return res.download(target);
   }
   @Get('telemetry') async telemetry() {
     const active = this.r.db.sandboxExecutions().filter((item) => item.status === 'running').length;

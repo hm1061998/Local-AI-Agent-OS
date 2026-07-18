@@ -27,7 +27,7 @@ function Layout({ children }: { children: ReactNode }) {
   return (
     <div className="shell">
       <header>
-        <Link to="/workspace" className="brand">
+        <Link to="/universe" className="brand">
           Local Agent OS
         </Link>
         <nav>
@@ -626,6 +626,16 @@ export function App() {
   return (
     <Routes>
       <Route path="/workspace" element={<Workspace />} />
+      <Route
+        path="/"
+        element={
+          <Layout>
+            <Deferred>
+              <Universe />
+            </Deferred>
+          </Layout>
+        }
+      />
       <Route path="/tasks/:taskId" element={<TaskDetail />} />
       <Route path="/agents" element={<AgentFlow />} />
       <Route path="/tasks/:taskId/agents" element={<AgentFlow taskOnly />} />

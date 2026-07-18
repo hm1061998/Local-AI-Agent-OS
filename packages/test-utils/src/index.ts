@@ -6,6 +6,7 @@ import type {
 } from '@local-agent/model-provider';
 import type { ModelHealth, TaskAnalysis } from '@local-agent/agent-protocol';
 export class MockModelProvider implements ModelProvider {
+  private structuredCalls = 0;
   constructor(
     private readonly analysis: TaskAnalysis = {
       title: 'Mock task',
@@ -33,7 +34,13 @@ export class MockModelProvider implements ModelProvider {
     yield { type: 'done', content: '' };
   }
   async generateStructured<T>(request: StructuredGenerationRequest<T>): Promise<T> {
-    return request.schema.parse(this.analysis);
+    this.structuredCalls += 1;
+    if (this.structuredCalls === 1) return request.schema.parse(this.analysis);
+    try {
+      return request.schema.parse(this.analysis);
+    } catch {
+      return request.schema.parse({ output: 'mock output', summary: 'Mock execution completed.' });
+    }
   }
   async embed(texts: string[]): Promise<number[][]> {
     return texts.map(() => [1]);

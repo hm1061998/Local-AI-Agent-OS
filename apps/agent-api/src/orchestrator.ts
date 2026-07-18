@@ -4,6 +4,7 @@ import type {
   AgentEvent,
   AgentState,
   ExecutionBudget,
+  SkillManifest,
   TaskAnalysis,
 } from '@local-agent/agent-protocol';
 import { ModelProviderError, type ModelProvider } from '@local-agent/model-provider';
@@ -11,6 +12,21 @@ import { DEFAULT_BUDGET, taskAnalysisSchema } from '@local-agent/shared-types';
 import { AgentDatabase } from './database';
 import { createPlan, executeSkill, validatePlan } from './skills';
 import { createProposal } from './phase2';
+
+const meaningfulValueSchema = z
+  .union([
+    z.string().min(1),
+    z.array(z.unknown()).min(1),
+    z.record(z.string(), z.unknown()).refine((value) => Object.keys(value).length > 0),
+    z.number(),
+    z.boolean(),
+  ])
+  .refine((value) => value !== null && value !== undefined, 'Output must not be empty');
+const skillExecutionResultSchema = z.object({
+  output: meaningfulValueSchema,
+  summary: z.string().min(1).optional(),
+  artifacts: z.array(z.string()).optional(),
+});
 
 export class BudgetGuard {
   modelCalls = 0;
@@ -36,7 +52,7 @@ const transitions: Record<AgentState, AgentState[]> = {
   analyzing_task: ['searching_skills', 'failed', 'cancelled'],
   searching_skills: ['planning', 'creating_skill', 'failed', 'cancelled'],
   creating_skill: ['testing_skill', 'failed', 'cancelled'],
-  testing_skill: ['waiting_for_approval', 'failed', 'cancelled'],
+  testing_skill: ['searching_skills', 'waiting_for_approval', 'failed', 'cancelled'],
   waiting_for_approval: ['searching_skills', 'failed', 'cancelled'],
   planning: ['executing', 'failed', 'cancelled'],
   executing: ['validating', 'failed', 'cancelled'],
@@ -120,7 +136,7 @@ export class Orchestrator extends EventEmitter {
       );
       const active = this.db.listSkills().filter((skill) => skill.status === 'active');
       const required = new Set(analysis.requiredCapabilities.map((value) => value.toLowerCase()));
-      const matches = active.filter(
+      let matches = active.filter(
         (skill) =>
           skill.manifest.capabilities.some((value) => required.has(value.toLowerCase())) ||
           skill.manifest.tags.some((value) =>
@@ -156,16 +172,31 @@ export class Orchestrator extends EventEmitter {
           'Đề xuất đã vượt qua kiểm tra schema và quyền.',
           { passed: true, ruleBased: true },
         );
-        const approval = this.db.createApproval(proposal, id);
-        this.move(
+        const manifest: SkillManifest = {
+          id: proposal.name,
+          name: proposal.name,
+          version: '1.0.0',
+          description: proposal.description,
+          tags: proposal.missingCapabilities,
+          triggers: proposal.missingCapabilities,
+          runtime: { type: proposal.runtimeType, timeoutSeconds: 30 },
+          inputSchema: { type: 'object' },
+          outputSchema: { type: 'object' },
+          permissions: proposal.permissions,
+          riskLevel: proposal.riskLevel,
+          approvalRequired: false,
+          capabilities: proposal.missingCapabilities,
+        };
+        this.db.installSkill(manifest, 'active', 'agent');
+        state = this.move(
           id,
           state,
-          'waiting_for_approval',
-          'SKILL_APPROVAL_REQUIRED',
-          'Cần phê duyệt skill để tiếp tục task.',
-          { approvalId: approval.id, proposal },
+          'searching_skills',
+          'SKILL_AUTO_INSTALLED',
+          'Skill khai báo an toàn đã được tự động kích hoạt.',
+          { skillId: manifest.id, manifest },
         );
-        return;
+        matches = this.db.listSkills().filter((skill) => skill.id === manifest.id);
       }
       const selected = matches[0]!;
       const routing = {
@@ -178,7 +209,15 @@ export class Orchestrator extends EventEmitter {
         confidence: 1,
         missingCapabilities: [],
       };
-      this.event(id, 'SKILL_SELECTED', state, `Đã chọn skill ${selected.name}.`, routing);
+      this.event(id, 'SKILL_SELECTED', state, `Đã chọn skill ${selected.name}.`, {
+        ...routing,
+        registryCount: active.length + (active.some((skill) => skill.id === selected.id) ? 0 : 1),
+        selectedSkill: {
+          id: selected.id,
+          name: selected.name,
+          runtime: selected.manifest.runtime.type,
+        },
+      });
       state = this.move(
         id,
         state,
@@ -217,20 +256,66 @@ export class Orchestrator extends EventEmitter {
           `Đang thực thi bước ${step.order}/${plan.steps.length}.`,
           step,
         );
-        if (selected.manifest.runtime.type === 'prompt') {
-          guard.modelCall();
-          results.push(
-            await this.model.generateStructured({
-              prompt: `Execute declarative skill ${selected.name}. Request: ${input}`,
-              schema: z.record(z.string(), z.unknown()),
-              signal: controller.signal,
-            }),
-          );
-        } else
-          results.push(
-            await executeSkill(step.skillId, step.input, this.workspace, controller.signal),
-          );
-        this.event(id, 'STEP_COMPLETED', state, `Đã hoàn thành bước ${step.order}.`);
+        let result: unknown;
+        for (let attempt = 0; attempt <= budget.maxRetriesPerStep; attempt += 1) {
+          try {
+            if (selected.manifest.runtime.type === 'prompt') {
+              guard.modelCall();
+              result = await this.model.generateStructured({
+                prompt: [
+                  `Execute the declarative skill "${selected.name}".`,
+                  `Skill purpose: ${selected.description}.`,
+                  `Required capabilities: ${selected.manifest.capabilities.join(', ')}.`,
+                  `Original user request: ${input}`,
+                  `Current step: ${step.title} — ${step.description}.`,
+                  'Return the actual final result in the required "output" field.',
+                  'For translation, output must contain the translated text, not an explanation.',
+                  'For generated files, include their workspace-relative paths in "artifacts".',
+                  'Never return an empty object or placeholder.',
+                ].join('\n'),
+                schema: skillExecutionResultSchema,
+                signal: controller.signal,
+              });
+            } else
+              result = await executeSkill(
+                step.skillId,
+                step.input,
+                this.workspace,
+                controller.signal,
+              );
+            break;
+          } catch (reason) {
+            const message = reason instanceof Error ? reason.message : String(reason);
+            this.event(id, 'STEP_FAILED', state, `Bước ${step.order} thất bại: ${message}`, {
+              step,
+              attempt,
+              reason: message,
+            });
+            if (
+              attempt >= budget.maxRetriesPerStep ||
+              ['WORKSPACE_ACCESS_DENIED', 'TASK_CANCELLED'].includes(message)
+            )
+              throw reason;
+            this.event(
+              id,
+              'STEP_RETRYING',
+              state,
+              `Thử lại bước ${step.order} sau khi phân loại lỗi.`,
+              {
+                step,
+                nextAttempt: attempt + 1,
+                reason: message,
+                changed: 'retry after structured failure classification',
+              },
+            );
+          }
+        }
+        results.push(result);
+        this.event(id, 'STEP_COMPLETED', state, `Đã hoàn thành bước ${step.order}.`, {
+          step,
+          result,
+          artifacts: collectArtifacts(result),
+        });
       }
       state = this.move(
         id,
@@ -241,7 +326,7 @@ export class Orchestrator extends EventEmitter {
       );
       this.event(id, 'RESULT_VALIDATION_COMPLETED', state, 'Kết quả hợp lệ.', { results });
       state = this.move(id, state, 'completed', 'TASK_COMPLETED', 'Hoàn thành.', { results });
-      this.db.updateTask(id, state, { resultSummary: `Hoàn thành ${plan.steps.length} bước.` });
+      this.db.updateTask(id, state, { resultSummary: JSON.stringify(results) });
     } catch (error) {
       this.fail(id, state, controller, error);
     } finally {
@@ -324,4 +409,16 @@ export class Orchestrator extends EventEmitter {
     this.db.addEvent(event);
     this.emit('event', event);
   }
+}
+
+function collectArtifacts(value: unknown): string[] {
+  const found = new Set<string>();
+  const visit = (item: unknown) => {
+    if (typeof item === 'string' && /(?:^|[\\/])[^\\/]+\.[a-z0-9]{2,8}$/i.test(item))
+      found.add(item);
+    else if (Array.isArray(item)) item.forEach(visit);
+    else if (item && typeof item === 'object') Object.values(item).forEach(visit);
+  };
+  visit(value);
+  return [...found];
 }

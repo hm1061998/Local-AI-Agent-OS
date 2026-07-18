@@ -77,5 +77,6 @@ export const api = {
       body: JSON.stringify({ mode }),
     }),
   benchmark: () => json<any>('/benchmarks/multi-agent'),
+  artifactUrl: (path: string) => `/api/artifacts?path=${encodeURIComponent(path)}`,
 };
 export const socket = io('/agent', { path: '/socket.io' });

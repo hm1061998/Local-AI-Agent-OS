@@ -32,8 +32,14 @@ export interface UniverseState {
 export const clampNodeSize = (usage: number) =>
   Math.max(0.55, Math.min(1.8, 0.55 + Math.log2(usage + 1) * 0.18));
 export function radialPosition(index: number, total: number, radius = 6): [number, number, number] {
-  const angle = total ? (index / total) * Math.PI * 2 : 0;
-  return [Math.cos(angle) * radius, Math.sin(index * 0.7) * 1.2, Math.sin(angle) * radius];
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const angle = index * goldenAngle;
+  const spread = radius * (0.34 + 0.66 * Math.sqrt((index + 1) / Math.max(1, total)));
+  return [
+    Math.cos(angle) * spread,
+    Math.sin(index * 1.71) * 2.3,
+    Math.sin(angle) * spread * 0.72 + Math.cos(index * 0.93) * 1.4,
+  ];
 }
 export function graphFromSkills(skills: any[]): UniverseState {
   const agent: SkillGraphNode = {
@@ -65,13 +71,41 @@ export function graphFromSkills(skills: any[]): UniverseState {
       position: radialPosition(index, skills.length),
     })),
   ];
-  const edges = skills.map((skill): SkillGraphEdge => ({
-    id: `agent-${skill.id}`,
-    source: 'agent-core',
-    target: skill.id,
-    type: skill.createdBy === 'agent' ? 'generated_from' : 'usage',
-    weight: Math.max(1, skill.usageCount ?? 1),
-  }));
+  const coreStride = Math.max(1, Math.ceil(skills.length / 4));
+  const coreEdges = skills
+    .filter((_, index) => index % coreStride === 0)
+    .map((skill): SkillGraphEdge => ({
+      id: `agent-${skill.id}`,
+      source: 'agent-core',
+      target: skill.id,
+      type: skill.createdBy === 'agent' ? 'generated_from' : 'usage',
+      weight: Math.max(1, skill.usageCount ?? 1),
+    }));
+  const constellationEdges = skills.flatMap((skill, index): SkillGraphEdge[] => {
+    if (skills.length < 2) return [];
+    const next = skills[(index + 1) % skills.length];
+    const edges: SkillGraphEdge[] = [
+      {
+        id: `constellation-${skill.id}-${next.id}`,
+        source: skill.id,
+        target: next.id,
+        type: 'workflow',
+        weight: 1,
+      },
+    ];
+    if (skills.length > 5 && index % 3 === 0) {
+      const chord = skills[(index + 3) % skills.length];
+      edges.push({
+        id: `chord-${skill.id}-${chord.id}`,
+        source: skill.id,
+        target: chord.id,
+        type: 'dependency',
+        weight: 1,
+      });
+    }
+    return edges;
+  });
+  const edges = [...coreEdges, ...constellationEdges];
   return { nodes, edges, events: [] };
 }
 function patchNode(nodes: SkillGraphNode[], id: string, patch: Partial<SkillGraphNode>) {

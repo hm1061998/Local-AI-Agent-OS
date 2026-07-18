@@ -7,6 +7,7 @@ import {
   replayReducer,
   validateWorkflowDraft,
 } from './universe-state';
+import { mergePersistedEvents } from './Universe';
 const event = (type: any, payload?: unknown) =>
   ({
     id: crypto.randomUUID(),
@@ -19,6 +20,21 @@ const event = (type: any, payload?: unknown) =>
     payload,
   }) as any;
 describe('universe state', () => {
+  it('hydrates persisted events without duplicating websocket events', () => {
+    const initial = graphFromSkills([]);
+    const event = {
+      id: 'event-1',
+      taskId: 'task-1',
+      type: 'TASK_RECEIVED' as const,
+      state: 'idle' as const,
+      message: 'received',
+      timestamp: new Date().toISOString(),
+      sequence: 1,
+    };
+    const once = mergePersistedEvents(initial, [event]);
+    const twice = mergePersistedEvents(once, [event]);
+    expect(twice.events).toHaveLength(1);
+  });
   it('clamps node size', () => {
     expect(clampNodeSize(0)).toBe(0.55);
     expect(clampNodeSize(1e9)).toBe(1.8);
