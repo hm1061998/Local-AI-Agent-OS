@@ -38,6 +38,12 @@ export class AgentDatabase {
     this.db.exec(
       `CREATE TABLE IF NOT EXISTS task_permission_requests(id TEXT PRIMARY KEY,task_id TEXT NOT NULL UNIQUE,skill_id TEXT NOT NULL,permissions_json TEXT NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,scope TEXT,created_at TEXT NOT NULL,decided_at TEXT);`,
     );
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS task_permission_requests_v2(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,skill_id TEXT NOT NULL,permissions_json TEXT NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,scope TEXT,created_at TEXT NOT NULL,decided_at TEXT);CREATE INDEX IF NOT EXISTS idx_permission_requests_v2_task ON task_permission_requests_v2(task_id,created_at);`,
+    );
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS task_plans(task_id TEXT PRIMARY KEY,plan_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,decided_at TEXT);`,
+    );
   }
   private addColumn(table: string, column: string, definition: string) {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
@@ -314,8 +320,12 @@ export class AgentDatabase {
       .run(key, JSON.stringify(value), new Date().toISOString());
   }
   createPermissionRequest(taskId: string, skillId: string, permissions: unknown, reason: string) {
-    const existing = this.permissionRequest(taskId);
-    if (existing) return existing;
+    const existing = this.db
+      .prepare(
+        "SELECT id,task_id taskId,skill_id skillId,permissions_json permissions,reason,status,scope,created_at createdAt,decided_at decidedAt FROM task_permission_requests_v2 WHERE task_id=? AND skill_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(taskId, skillId) as any;
+    if (existing) return { ...existing, permissions: JSON.parse(existing.permissions) };
     const request = {
       id: crypto.randomUUID(),
       taskId,
@@ -327,7 +337,7 @@ export class AgentDatabase {
     };
     this.db
       .prepare(
-        'INSERT INTO task_permission_requests(id,task_id,skill_id,permissions_json,reason,status,created_at) VALUES(?,?,?,?,?,?,?)',
+        'INSERT INTO task_permission_requests_v2(id,task_id,skill_id,permissions_json,reason,status,created_at) VALUES(?,?,?,?,?,?,?)',
       )
       .run(
         request.id,
@@ -344,18 +354,18 @@ export class AgentDatabase {
   permissionRequest(taskId: string) {
     const row = this.db
       .prepare(
-        'SELECT id,task_id taskId,skill_id skillId,permissions_json permissions,reason,status,scope,created_at createdAt,decided_at decidedAt FROM task_permission_requests WHERE task_id=?',
+        "SELECT id,task_id taskId,skill_id skillId,permissions_json permissions,reason,status,scope,created_at createdAt,decided_at decidedAt FROM task_permission_requests_v2 WHERE task_id=? ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at DESC LIMIT 1",
       )
       .get(taskId) as any;
     return row ? { ...row, permissions: JSON.parse(row.permissions) } : undefined;
   }
   decidePermission(id: string, status: 'approved' | 'rejected', scope: 'once' | 'all') {
     this.db
-      .prepare('UPDATE task_permission_requests SET status=?,scope=?,decided_at=? WHERE id=?')
+      .prepare('UPDATE task_permission_requests_v2 SET status=?,scope=?,decided_at=? WHERE id=?')
       .run(status, scope, new Date().toISOString(), id);
     const row = this.db
-      .prepare('SELECT task_id taskId FROM task_permission_requests WHERE id=?')
-      .get(id) as { taskId: string } | undefined;
+      .prepare('SELECT task_id taskId,skill_id skillId FROM task_permission_requests_v2 WHERE id=?')
+      .get(id) as { taskId: string; skillId: string } | undefined;
     if (scope === 'all' && status === 'approved') this.setSetting('authorizeAllPermissions', true);
     if (row)
       this.audit(
@@ -364,12 +374,43 @@ export class AgentDatabase {
         row.taskId,
         { requestId: id, scope },
       );
-    return row ? this.permissionRequest(row.taskId) : undefined;
+    if (!row) return undefined;
+    const request = this.db
+      .prepare(
+        'SELECT id,task_id taskId,skill_id skillId,permissions_json permissions,reason,status,scope,created_at createdAt,decided_at decidedAt FROM task_permission_requests_v2 WHERE id=?',
+      )
+      .get(id) as any;
+    return request ? { ...request, permissions: JSON.parse(request.permissions) } : undefined;
   }
-  hasPermissionGrant(taskId: string) {
+  createTaskPlan(taskId: string, plan: unknown) {
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare('INSERT OR REPLACE INTO task_plans(task_id,plan_json,status,created_at,decided_at) VALUES(?,?,?, ?,NULL)')
+      .run(taskId, JSON.stringify(plan), 'pending', createdAt);
+    return { taskId, plan, status: 'pending', createdAt };
+  }
+  taskPlan(taskId: string) {
+    const row = this.db
+      .prepare('SELECT task_id taskId,plan_json plan,status,created_at createdAt,decided_at decidedAt FROM task_plans WHERE task_id=?')
+      .get(taskId) as { taskId: string; plan: string; status: string; createdAt: string; decidedAt?: string } | undefined;
+    return row ? { ...row, plan: JSON.parse(row.plan) } : undefined;
+  }
+  decideTaskPlan(taskId: string, status: 'approved' | 'rejected') {
+    this.db
+      .prepare('UPDATE task_plans SET status=?,decided_at=? WHERE task_id=?')
+      .run(status, new Date().toISOString(), taskId);
+    return this.taskPlan(taskId);
+  }
+  hasPermissionGrant(taskId: string, skillId?: string) {
     return (
       this.setting<boolean>('authorizeAllPermissions', false) ||
-      this.permissionRequest(taskId)?.status === 'approved'
+      Boolean(
+        this.db
+          .prepare(
+            `SELECT 1 FROM task_permission_requests_v2 WHERE task_id=? AND status='approved'${skillId ? ' AND skill_id=?' : ''} LIMIT 1`,
+          )
+          .get(...(skillId ? [taskId, skillId] : [taskId])),
+      )
     );
   }
   createAgentRun(taskId: string, mode: string, state: string, budget: unknown, signals: unknown) {

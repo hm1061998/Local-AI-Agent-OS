@@ -31,6 +31,14 @@ The default (`AI_PROVIDER=auto`) tries Ollama first and uses a paid OpenAI-compa
 
 The agent creates a safe declarative recovery skill when routing fails or a compatible skill errors. Tool installation is deliberately constrained to the static `managedTools` allow-list and is enabled by default; set `AGENT_AUTO_INSTALL_TOOLS=false` to report missing tools without modifying the workspace.
 
+Artifact requests are normalized to two concrete steps: read the requested source file and generate a verified file under `.local-agent/output`. Built-in generators support PDF, DOCX, XLSX, CSV, JSON, HTML, Markdown, TXT, and SVG. The task cannot complete until the requested artifact exists; the result panel provides a download link.
+
+## Autonomous operation
+
+`AGENT_AUTONOMOUS_PLANNER` is enabled by default. It lets the model infer the task's capabilities, success criteria, required artifact types, and whether to reuse, compose, create a skill, or install a tool. The model never emits shell commands or package names: local policy resolves those requests to a sandboxed skill or an allow-listed dependency. Set `AGENT_AUTONOMOUS_PLANNER=false` to retain deterministic routing only.
+
+When a task needs extra filesystem, command, network, or environment access, the agent pauses and asks for approval. The same approval card appears before installing a missing tool or dependency; it lists the packages, package-manager command, workspace files, and registry hosts involved. Approval resumes the same task and permits only that request (or all future requests if the user explicitly chooses that option).
+
 `OLLAMA_NUM_GPU=0` is the safe default and runs Ollama inference on CPU. Increase it only after confirming the local CUDA driver and Ollama GPU runner are stable.
 
 ## Run

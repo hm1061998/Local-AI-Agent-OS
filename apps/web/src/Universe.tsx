@@ -352,6 +352,11 @@ function FriendlyOutput({ value }: { value: unknown }) {
   const metadata = object
     ? Object.entries(object).filter(([key]) => key !== preferredKey && key !== 'artifacts')
     : [];
+  const artifacts = object
+    ? (Array.isArray(object.artifacts) ? object.artifacts : [object.file]).filter(
+        (path): path is string => typeof path === 'string' && path.length > 0,
+      )
+    : [];
   const copyValue = typeof primary === 'string' ? primary : JSON.stringify(value, null, 2);
   const preview = copyValue.replace(/\s+/g, ' ').trim();
   return (
@@ -407,6 +412,15 @@ function FriendlyOutput({ value }: { value: unknown }) {
           ))}
         </dl>
       )}
+      {artifacts.length > 0 && (
+        <div className="result-artifacts">
+          {artifacts.map((path) => (
+            <a href={api.artifactUrl(path)} download={path.split(/[\\/]/).at(-1)} key={path}>
+              Tải file: {path}
+            </a>
+          ))}
+        </div>
+      )}
       {typeof value === 'object' && (
         <details className="raw-result">
           <summary>Xem dữ liệu JSON</summary>
@@ -418,11 +432,13 @@ function FriendlyOutput({ value }: { value: unknown }) {
 }
 function AgentComposer({
   running,
+  waitingForPlan,
   canCancel,
   onRun,
   onCancel,
 }: {
   running: boolean;
+  waitingForPlan?: boolean;
   canCancel: boolean;
   onRun(request: string): Promise<void>;
   onCancel(): void;
@@ -450,7 +466,7 @@ function AgentComposer({
       />
       <div className="actions">
         <button disabled={running || !draft.trim()} onClick={() => void submit()}>
-          {running ? 'Agents đang chạy…' : 'Gửi yêu cầu'}
+          {waitingForPlan ? 'Đang chờ bạn duyệt kế hoạch' : running ? 'Agents đang chạy…' : 'Gửi yêu cầu'}
         </button>
         {canCancel && running && (
           <button className="secondary" onClick={onCancel}>
@@ -470,6 +486,10 @@ function PermissionCard({
 }) {
   const permissions = request.permissions ?? {};
   const items = [
+    ...(permissions.packages ?? []).map(
+      (item: { name?: string; capability?: string }) =>
+        `Cài package: ${item.name ?? 'không xác định'}${item.capability ? ` (${item.capability})` : ''}`,
+    ),
     ...(permissions.filesystem?.write ?? []).map((path: string) => `Ghi file: ${path}`),
     ...(permissions.commands ?? []).map((command: string) => `Chạy lệnh: ${command}`),
     ...(permissions.network?.enabled
@@ -518,6 +538,42 @@ export function mergePersistedEvents(current: UniverseState, events: AgentEvent[
     ),
   };
 }
+function PlanApprovalCard({
+  plan,
+  onDecision,
+}: {
+  plan: any;
+  onDecision(approved: boolean): Promise<void>;
+}) {
+  const steps = plan.plan?.steps ?? [];
+  const displayStep = (step: any) => {
+    const title = String(step.title ?? '');
+    return /parse|extract|requiredcapabilities|constraints|estimatedrisk/i.test(title) || title.length > 96
+      ? `Thực hiện bước ${step.order} theo yêu cầu của bạn`
+      : title;
+  };
+  return (
+    <section className="permission-card plan-approval-card">
+      <div className="permission-title">
+        <span>KẾ HOẠCH AI ĐỀ XUẤT</span>
+        <b>Chờ xác nhận</b>
+      </div>
+      <p className="plan-goal">{plan.plan?.goal}</p>
+      <small>Agent sẽ không chạy skill, cài package hoặc ghi file trước khi bạn đồng ý.</small>
+      <ol>
+        {steps.map((step: any) => (
+          <li key={step.id}>
+            <b>{step.order}. {displayStep(step)}</b>
+          </li>
+        ))}
+      </ol>
+      <div className="permission-actions">
+        <button onClick={() => void onDecision(true)}>Đồng ý kế hoạch</button>
+        <button className="secondary" onClick={() => void onDecision(false)}>Từ chối</button>
+      </div>
+    </section>
+  );
+}
 export function Universe() {
   const [skills, setSkills] = useState<any[]>([]),
     [graph, setGraph] = useState<UniverseState>(() => graphFromSkills([])),
@@ -528,6 +584,7 @@ export function Universe() {
     [telemetry, setTelemetry] = useState<any>(),
     [activeTaskId, setActiveTaskId] = useState<string>(),
     [currentRequest, setCurrentRequest] = useState(''),
+    [planApproval, setPlanApproval] = useState<any>(),
     [permissionRequest, setPermissionRequest] = useState<any>(),
     [output, setOutput] = useState<unknown>(),
     [running, setRunning] = useState(false),
@@ -610,6 +667,12 @@ export function Universe() {
         } catch {
           if (!disposed) setPermissionRequest(undefined);
         }
+        try {
+          const proposal = await api.taskPlan(activeTaskId);
+          if (!disposed) setPlanApproval(proposal?.status === 'pending' ? proposal : undefined);
+        } catch {
+          if (!disposed) setPlanApproval(undefined);
+        }
       } catch (reason) {
         if (!disposed) setError(reason instanceof Error ? reason.message : String(reason));
       }
@@ -638,6 +701,7 @@ export function Universe() {
       setRunning(true);
       setCurrentRequest(request);
       setPermissionRequest(undefined);
+      setPlanApproval(undefined);
       setActiveTaskId(undefined);
       setGraph((current) => resetUniverseExecution(current));
       const task = await api.create(request);
@@ -710,7 +774,7 @@ export function Universe() {
           </p>
         </div>
         <aside className="inspector">
-          {plan?.steps?.length > 0 && (
+          {!planApproval && plan?.steps?.length > 0 && (
             <details
               className="execution-plan"
               open={!taskEvents.some((event) => event.type === 'TASK_COMPLETED')}
@@ -740,6 +804,16 @@ export function Universe() {
                 if (action === 'reject') await api.rejectPermission(permissionRequest.id);
                 else await api.approvePermission(permissionRequest.id, action);
                 setPermissionRequest(undefined);
+              }}
+            />
+          )}
+          {planApproval && (
+            <PlanApprovalCard
+              plan={planApproval}
+              onDecision={async (approved) => {
+                if (approved) await api.approveTaskPlan(activeTaskId!);
+                else await api.rejectTaskPlan(activeTaskId!);
+                setPlanApproval(undefined);
               }}
             />
           )}
@@ -787,6 +861,7 @@ export function Universe() {
           {error && <pre className="error">{error}</pre>}
           <AgentComposer
             running={running}
+            waitingForPlan={Boolean(planApproval)}
             canCancel={Boolean(activeTaskId)}
             onRun={run}
             onCancel={() => {

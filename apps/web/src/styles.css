@@ -245,9 +245,9 @@ select {
   overflow: hidden;
 }
 .inspector {
-  overflow: auto;
-  display: grid;
-  grid-template-rows: auto minmax(160px, 1fr) auto auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 0;
   border-radius: 0 2px 2px 0;
@@ -255,6 +255,7 @@ select {
   background: #030914f5;
 }
 .execution-plan {
+  flex: 0 0 auto;
   padding: 12px 14px;
   border-bottom: 1px solid #173044;
   font-size: 12px;
@@ -309,6 +310,7 @@ select {
   box-shadow: 0 0 8px #55ffc555;
 }
 .permission-card {
+  flex: 0 0 auto;
   margin: 0;
   padding: 13px 14px;
   border: 1px solid #8a6b25;
@@ -344,6 +346,31 @@ select {
   grid-template-columns: 1fr 1fr auto;
   gap: 7px;
 }
+.plan-approval-card {
+  max-height: 280px;
+  overflow: auto;
+}
+.plan-approval-card .plan-goal {
+  margin: 7px 0 4px;
+  color: #fff8df;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.plan-approval-card ol {
+  margin: 9px 0 12px;
+  padding-left: 18px;
+}
+.plan-approval-card li {
+  padding: 3px 0;
+  color: #e7dcbf;
+}
+.plan-approval-card .permission-actions {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  position: sticky;
+  bottom: 0;
+  padding-top: 8px;
+  background: #171307;
+}
 .permission-actions button {
   padding: 8px 9px;
   font-size: 10px;
@@ -360,6 +387,7 @@ select {
 }
 .trace-panel {
   overflow: auto;
+  flex: 1 1 180px;
   min-height: 0;
   padding: 12px 14px;
   font:

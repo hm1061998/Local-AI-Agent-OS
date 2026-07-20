@@ -1,6 +1,12 @@
 import { spawn } from 'node:child_process';
 
-export type ToolStatus = 'available' | 'missing' | 'installed' | 'disabled' | 'failed';
+export type ToolStatus =
+  | 'available'
+  | 'missing'
+  | 'approval_required'
+  | 'installed'
+  | 'disabled'
+  | 'failed';
 export interface ManagedTool {
   id: string;
   capability: string;
@@ -34,6 +40,17 @@ export const managedTools: ManagedTool[] = [
   },
 ];
 
+/**
+ * Dependency catalogue. The model can request a capability, never a command
+ * or arbitrary package name; this table is the only route to installation.
+ */
+export const managedLibraries: ManagedTool[] = [
+  { id: 'docx', capability: 'document:docx-advanced', executable: 'node', packageName: 'docx', install: ['yarn', 'add', 'docx'] },
+  { id: 'xlsx', capability: 'spreadsheet:xlsx-advanced', executable: 'node', packageName: 'xlsx', install: ['yarn', 'add', 'xlsx'] },
+  { id: 'sharp', capability: 'image:transform', executable: 'node', packageName: 'sharp', install: ['yarn', 'add', 'sharp'] },
+  { id: 'pdfkit', capability: 'document:pdf-advanced', executable: 'node', packageName: 'pdfkit', install: ['yarn', 'add', 'pdfkit'] },
+];
+
 function run(command: string, args: string[], cwd: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, shell: false, stdio: 'ignore' });
@@ -56,15 +73,16 @@ export class ToolInstaller {
       return 'missing';
     }
   }
-  async ensureCapabilities(capabilities: string[]) {
-    const requested = managedTools.filter((tool) =>
+  async ensureCapabilities(capabilities: string[], authorized = false) {
+    const requested = [...managedTools, ...managedLibraries].filter((tool) =>
       capabilities.some((value) => value.toLowerCase() === tool.capability),
     );
-    return Promise.all(requested.map((tool) => this.ensure(tool)));
+    return Promise.all(requested.map((tool) => this.ensure(tool, authorized)));
   }
-  async ensure(tool: ManagedTool) {
-    const before = await this.status(tool);
+  async ensure(tool: ManagedTool, authorized = false) {
+    const before = await this.packageStatus(tool);
     if (before === 'available') return { tool, status: before };
+    if (!authorized) return { tool, status: 'approval_required' as ToolStatus };
     if (!this.enabled || tool.install.length === 0) {
       const status: ToolStatus = this.enabled ? 'failed' : 'disabled';
       return { tool, status };
@@ -78,5 +96,17 @@ export class ToolInstaller {
     } catch {
       return { tool, status: 'failed' as ToolStatus };
     }
+  }
+  private async packageStatus(tool: ManagedTool): Promise<ToolStatus> {
+    if (managedLibraries.some((library) => library.id === tool.id)) {
+      try {
+        return (await run('yarn', ['why', tool.packageName], this.workspace)) === 0
+          ? 'available'
+          : 'missing';
+      } catch {
+        return 'missing';
+      }
+    }
+    return this.status(tool);
   }
 }

@@ -12,6 +12,9 @@ export const api = {
   tasks: () => json<TaskRecord[]>('/tasks'),
   task: (id: string) => json<TaskRecord>(`/tasks/${id}`),
   events: (id: string) => json<AgentEvent[]>(`/tasks/${id}/events`),
+  taskPlan: (id: string) => json<any>(`/tasks/${id}/plan`),
+  approveTaskPlan: (id: string) => json<any>(`/tasks/${id}/plan/approve`, { method: 'POST' }),
+  rejectTaskPlan: (id: string) => json<any>(`/tasks/${id}/plan/reject`, { method: 'POST' }),
   create: (input: string) =>
     json<TaskRecord>('/tasks', {
       method: 'POST',

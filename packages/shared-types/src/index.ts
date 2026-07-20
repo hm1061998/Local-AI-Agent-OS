@@ -6,6 +6,7 @@ export const agentStates = [
   'planning',
   'creating_skill',
   'testing_skill',
+  'waiting_for_plan_approval',
   'waiting_for_approval',
   'executing',
   'validating',

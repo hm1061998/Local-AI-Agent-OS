@@ -16,8 +16,8 @@ import { WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import type { Server } from 'socket.io';
 import type { Response } from 'express';
 import { strToU8, unzipSync, zipSync } from 'fflate';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { basename, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { cpus, freemem, totalmem, loadavg } from 'node:os';
 import { z } from 'zod';
@@ -530,14 +530,23 @@ export class ApiController {
   @Get('audit-logs') auditLogs() {
     return this.r.db.auditLogs();
   }
-  @Get('artifacts') artifact(@Query('path') path: string, @Res() res: Response) {
+  @Get('artifacts') async artifact(@Query('path') path: string, @Res() res: Response) {
     if (!path) throw new HttpException('path is required', 400);
     const workspace = resolve(process.env.AGENT_WORKSPACE ?? process.cwd());
-    const target = resolve(workspace, path);
-    const allowedRoots = [resolve(workspace, '.local-agent/output'), resolve(workspace, 'Uploads')];
-    if (!allowedRoots.some((root) => target === root || target.startsWith(`${root}\\`)))
+    const target = resolve(workspace, path.replace(/[\\/]+/g, sep));
+    const local = relative(workspace, target).replace(/\\/g, '/');
+    if (
+      local.startsWith('../') ||
+      !['.local-agent/output/', 'Uploads/'].some((root) => local.startsWith(root))
+    )
       throw new HttpException('Artifact path is outside allowed output directories', 403);
-    return res.download(target);
+    try {
+      if (!(await stat(target)).isFile()) throw new Error('not a file');
+    } catch {
+      throw new HttpException('Artifact no longer exists', 404);
+    }
+    res.setHeader('content-disposition', `attachment; filename="${basename(target)}"`);
+    return res.sendFile(target);
   }
   @Get('telemetry') async telemetry() {
     const active = this.r.db.sandboxExecutions().filter((item) => item.status === 'running').length;
@@ -607,6 +616,21 @@ export class ApiController {
   }
   @Get('tasks/:id/events') events(@Param('id') id: string) {
     return this.r.db.events(id);
+  }
+  @Get('tasks/:id/plan') taskPlan(@Param('id') id: string) {
+    return this.r.db.taskPlan(id) ?? { status: 'none' };
+  }
+  @Post('tasks/:id/plan/approve') approveTaskPlan(@Param('id') id: string) {
+    const plan = this.r.db.decideTaskPlan(id, 'approved');
+    if (!plan) throw new NotFoundException();
+    void this.r.orchestrator.resumePlan(id);
+    return plan;
+  }
+  @Post('tasks/:id/plan/reject') rejectTaskPlan(@Param('id') id: string) {
+    const plan = this.r.db.taskPlan(id);
+    if (!plan) throw new NotFoundException();
+    this.r.orchestrator.rejectPlan(id);
+    return { ...plan, status: 'rejected' };
   }
   @Get('tasks/:id/permissions') taskPermissions(@Param('id') id: string) {
     return this.r.db.permissionRequest(id) ?? { status: 'none' };

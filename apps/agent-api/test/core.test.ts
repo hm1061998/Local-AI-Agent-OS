@@ -15,13 +15,16 @@ import {
   BudgetGuard,
   Orchestrator,
   assertTransition,
+  normalizeArtifactTask,
+  inferArtifactExtension,
   normalizeLanguageTask,
+  normalizeFilesystemTask,
+  requiresUserPermission,
   isRecoverableSkillFailure,
   isRequestEcho,
   isUnchangedTranslation,
   extractResultText,
   friendlyStepWording,
-  requiresUserPermission,
   selectSkillsForCapabilities,
   withExecutionTimeout,
 } from '../src/orchestrator';
@@ -62,6 +65,28 @@ describe('language task normalization', () => {
       objectives: ['read file', 'translate content'],
     });
     expect(normalized.requiredCapabilities).toEqual(['filesystem:read', 'language:translate']);
+  });
+  it('turns a PDF request into read-and-generate artifact capabilities', () => {
+    const normalized = normalizeArtifactTask(
+      'đọc file README.md trong thư mục hrdx-fe và tạo thành file PDF',
+      analysis,
+    );
+    expect(normalized.requiredCapabilities).toEqual(['filesystem:read', 'document:pdf']);
+    expect(normalized.constraints).toContain('artifact:.pdf');
+  });
+  it('uses the requested target format instead of the source file extension', () => {
+    expect(inferArtifactExtension('chuyển README.md sang DOCX')).toBe('.docx');
+    expect(inferArtifactExtension('xuất dữ liệu report.csv ra file Excel')).toBe('.xlsx');
+    expect(inferArtifactExtension('đọc nội dung README.md')).toBeUndefined();
+  });
+  it('collapses a simple file-read request to one real capability', () => {
+    const normalized = normalizeFilesystemTask('read README.md and show its content', {
+      ...analysis,
+      objectives: ['Parse and extract specific fields', 'Read README.md'],
+      requiredCapabilities: ['read-files-from-the-filesystem', 'filesystem:read'],
+    });
+    expect(normalized.objectives).toEqual(['Read README.md']);
+    expect(normalized.requiredCapabilities).toEqual(['filesystem:read']);
   });
 });
 
@@ -169,8 +194,12 @@ describe('schemas', () => {
       ok: true,
     }));
   it('validates task analysis', () => expect(analysis.title).toBe('Read'));
-  it('validates six manifests', () =>
-    expect(manifests.map((manifest) => skillManifestSchema.parse(manifest))).toHaveLength(6));
+  it('validates built-in manifests including PDF generation', () => {
+    expect(manifests.map((manifest) => skillManifestSchema.parse(manifest))).toHaveLength(8);
+    expect(manifests.find((manifest) => manifest.id === 'pdf-generator')?.capabilities).toContain(
+      'document:pdf',
+    );
+  });
 });
 
 describe('routing and planning', () => {
@@ -181,10 +210,10 @@ describe('routing and planning', () => {
       validatePlan(createPlan(analysis, routeSkills(analysis)), 8).steps.length,
     ).toBeGreaterThan(0));
   it('passes the requested file to filesystem reader', () => {
-    const request = 'đọc nội dung file README.md trong thư mục local-ai-agent-os';
-    expect(inferFilesystemPath(request)).toBe('README.md');
+    const request = 'đọc nội dung file README.md trong thư mục hrdx-fe';
+    expect(inferFilesystemPath(request)).toBe('hrdx-fe/README.md');
     expect(createPlan(analysis, routeSkills(analysis), request).steps[0]?.input).toEqual({
-      path: 'README.md',
+      path: 'hrdx-fe/README.md',
     });
   });
   it('rejects excess', () =>
@@ -350,5 +379,14 @@ describe('integration', () => {
     const local = new OfflineProvider();
     const paid = new MockModelProvider(analysis);
     await expect(new FallbackModelProvider(local, paid).generateStructured({ prompt: 'analyze', schema: taskAnalysisSchema })).resolves.toEqual(analysis);
+  });
+  it('keeps package installation approval separate from a skill permission', () => {
+    const db = new AgentDatabase(':memory:');
+    const install = db.createPermissionRequest('task-1', 'tool-installer', { packages: ['xlsx'] }, 'install');
+    db.decidePermission(install.id, 'approved', 'once');
+    expect(db.hasPermissionGrant('task-1', 'tool-installer')).toBe(true);
+    expect(db.hasPermissionGrant('task-1', 'writer')).toBe(false);
+    const write = db.createPermissionRequest('task-1', 'writer', { filesystem: { write: ['Uploads/**'] } }, 'write');
+    expect(write.status).toBe('pending');
   });
 });

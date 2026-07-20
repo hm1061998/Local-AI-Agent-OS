@@ -10,9 +10,12 @@ import type {
 import { ModelProviderError, type ModelProvider } from '@local-agent/model-provider';
 import { DEFAULT_BUDGET, taskAnalysisSchema } from '@local-agent/shared-types';
 import { AgentDatabase } from './database';
-import { createPlan, executeSkill, inferFilesystemPath, validatePlan } from './skills';
+import { createPlan, executeSkill, inferFilesystemPath, safePath, validatePlan } from './skills';
+import { stat } from 'node:fs/promises';
 import { createProposal } from './phase2';
 import { ToolInstaller } from './tool-installer';
+import { uniqueCapabilities } from './autonomy-policy';
+import { applyAutonomousPlan, AutonomousPlanner, type AutonomousPlan } from './autonomous-planner';
 
 const meaningfulValueSchema = z
   .union([
@@ -44,6 +47,7 @@ const nonRecoverableSkillErrors = new Set([
   'OLLAMA_UNAVAILABLE',
   'MODEL_NOT_FOUND',
   'EXECUTION_TIMEOUT',
+  'SKILL_NOT_FOUND',
 ]);
 
 export function isRecoverableSkillFailure(reason: string) {
@@ -92,10 +96,11 @@ export class BudgetGuard {
 }
 const transitions: Record<AgentState, AgentState[]> = {
   idle: ['analyzing_task', 'cancelled'],
-  analyzing_task: ['searching_skills', 'failed', 'cancelled'],
+  analyzing_task: ['waiting_for_plan_approval', 'searching_skills', 'failed', 'cancelled'],
   searching_skills: ['planning', 'creating_skill', 'waiting_for_approval', 'failed', 'cancelled'],
   creating_skill: ['testing_skill', 'failed', 'cancelled'],
   testing_skill: ['searching_skills', 'waiting_for_approval', 'failed', 'cancelled'],
+  waiting_for_plan_approval: ['searching_skills', 'failed', 'cancelled'],
   waiting_for_approval: ['searching_skills', 'failed', 'cancelled'],
   planning: ['executing', 'failed', 'cancelled'],
   executing: ['validating', 'failed', 'cancelled'],
@@ -111,6 +116,7 @@ export function assertTransition(from: AgentState, to: AgentState) {
 export class Orchestrator extends EventEmitter {
   private controllers = new Map<string, AbortController>();
   private sequence = new Map<string, number>();
+  private planner: AutonomousPlanner;
   constructor(
     private db: AgentDatabase,
     private model: ModelProvider,
@@ -118,6 +124,7 @@ export class Orchestrator extends EventEmitter {
     private tools = new ToolInstaller(workspace),
   ) {
     super();
+    this.planner = new AutonomousPlanner(model);
   }
   cancel(id: string) {
     this.controllers.get(id)?.abort();
@@ -135,7 +142,18 @@ export class Orchestrator extends EventEmitter {
         'TASK_ANALYSIS_STARTED',
         'Đang phân tích yêu cầu.',
       );
-      const analysis = await this.analyze(input, controller.signal);
+      let analysis = await this.analyze(input, controller.signal);
+      const autonomy = await this.planAutonomously(input, analysis, controller.signal);
+      if (autonomy) {
+        analysis = applyAutonomousPlan(analysis, autonomy);
+        this.event(
+          id,
+          'SKILL_CANDIDATE_FOUND',
+          state,
+          `AI selected strategy "${autonomy.strategy}" with ${autonomy.capabilities.length} capability requirement(s).`,
+          autonomy,
+        );
+      }
       this.event(
         id,
         'TASK_ANALYSIS_COMPLETED',
@@ -143,8 +161,18 @@ export class Orchestrator extends EventEmitter {
         `Đã xác định ${analysis.objectives.length} mục tiêu.`,
         analysis,
       );
-      this.controllers.delete(id);
-      await this.execute(id, input, analysis, state, budget);
+      const proposal = buildPlanProposal(input, analysis);
+      const storedPlan = this.db.createTaskPlan(id, proposal);
+      this.event(id, 'PLAN_GENERATED', state, `AI generated a ${proposal.steps.length}-step plan.`, proposal);
+      state = this.move(
+        id,
+        state,
+        'waiting_for_plan_approval',
+        'PLAN_APPROVAL_REQUIRED',
+        'Kế hoạch đang chờ người dùng đồng ý trước khi thực thi.',
+        storedPlan,
+      );
+      return;
     } catch (error) {
       this.fail(id, state, controller, error);
     } finally {
@@ -199,8 +227,42 @@ export class Orchestrator extends EventEmitter {
         'SKILL_SEARCH_STARTED',
         'Đang tìm skill phù hợp.',
       );
-      const active = this.db.listSkills().filter((skill) => skill.status === 'active');
-      const toolResults = await this.tools.ensureCapabilities(analysis.requiredCapabilities);
+      const active = this.db
+        .listSkills()
+        .filter((skill) => skill.status === 'active' && !isRecoverySkill(skill));
+      const toolResults = await this.tools.ensureCapabilities(
+        analysis.requiredCapabilities,
+        this.db.hasPermissionGrant(id, 'tool-installer'),
+      );
+      const installsAwaitingApproval = toolResults.filter(
+        (result) => result.status === 'approval_required',
+      );
+      if (installsAwaitingApproval.length) {
+        const request = this.db.createPermissionRequest(
+          id,
+          'tool-installer',
+          {
+            packages: installsAwaitingApproval.map((result) => ({
+              name: result.tool.packageName,
+              capability: result.tool.capability,
+            })),
+            commands: installsAwaitingApproval.map((result) => result.tool.install.join(' ')),
+            filesystem: { read: [], write: ['package.json', 'yarn.lock'], delete: [] },
+            network: { enabled: true, allowedHosts: ['registry.yarnpkg.com', 'registry.npmjs.org'] },
+            environmentVariables: [],
+          },
+          `Agent cần cài ${installsAwaitingApproval.map((result) => result.tool.packageName).join(', ')} để có capability cho tác vụ.`,
+        );
+        this.move(
+          id,
+          state,
+          'waiting_for_approval',
+          'PERMISSION_APPROVAL_REQUIRED',
+          'Đang chờ người dùng cho phép cài package/tool cần thiết.',
+          request,
+        );
+        return;
+      }
       for (const tool of toolResults) {
         if (tool.status === 'installed')
           this.event(
@@ -289,7 +351,7 @@ export class Orchestrator extends EventEmitter {
       const permissionSkill = selectedSkills.find((skill) =>
         requiresUserPermission(skill.manifest),
       );
-      if (permissionSkill && !this.db.hasPermissionGrant(id)) {
+      if (permissionSkill && !this.db.hasPermissionGrant(id, permissionSkill.id)) {
         const request = this.db.createPermissionRequest(
           id,
           permissionSkill.id,
@@ -501,13 +563,30 @@ export class Orchestrator extends EventEmitter {
                 isUnchangedTranslation(upstreamText, output)
               )
                 throw new Error('TRANSLATION_UNCHANGED');
-            } else
+            } else {
+              const isArtifactGenerator =
+                stepSkill.manifest.capabilities.includes('document:pdf') ||
+                stepSkill.id === 'artifact-generator';
+              const executionInput =
+                isArtifactGenerator
+                  ? {
+                      ...step.input,
+                      source: extractResultText(results.at(-1)) ?? '',
+                      sourcePath: inferFilesystemPath(input),
+                      ...(stepSkill.id === 'artifact-generator'
+                        ? { outputExtension: inferArtifactExtension(input) ?? '.txt' }
+                        : {}),
+                    }
+                  : step.input;
               result = await executeSkill(
                 step.skillId,
-                step.input,
+                executionInput,
                 this.workspace,
                 controller.signal,
               );
+              if (isArtifactGenerator)
+                await this.assertProducedArtifacts(result);
+            }
             break;
           } catch (reason) {
             const message = reason instanceof Error ? reason.message : String(reason);
@@ -576,6 +655,7 @@ export class Orchestrator extends EventEmitter {
         'RESULT_VALIDATION_STARTED',
         'Đang kiểm tra kết quả.',
       );
+      this.assertCompletionContract(analysis, results);
       this.event(id, 'RESULT_VALIDATION_COMPLETED', state, 'Đã kiểm tra kết quả.', { results });
       state = this.move(id, state, 'completed', 'TASK_COMPLETED', 'Đã hoàn tất yêu cầu.', {
         results,
@@ -668,6 +748,10 @@ export class Orchestrator extends EventEmitter {
       'Skill thay thế đã tự khắc phục lỗi và hoàn thành tác vụ.',
       { passed: true, skillId: manifest.id },
     );
+    // Recovery is task-scoped evidence, not a replacement implementation.
+    // Keeping it out of routing prevents a generated workflow from wrapping
+    // itself on a later task.
+    this.db.setStatus(manifest.id, 'archived');
     return result;
   }
   private move(
@@ -713,7 +797,13 @@ export class Orchestrator extends EventEmitter {
           schema: taskAnalysisSchema,
           signal,
         });
-        return normalizeLanguageTask(input, analysis);
+        // A file-reading request has a deterministic, user-visible workflow.  Do
+        // not let an otherwise valid but generic model capability introduce an
+        // extra "process the request" step before the actual read operation.
+        return normalizeFilesystemTask(
+          input,
+          normalizeArtifactTask(input, normalizeLanguageTask(input, analysis)),
+        );
       } catch (error) {
         if (signal.aborted) throw new Error('TASK_CANCELLED');
         if (error instanceof ModelProviderError) throw error;
@@ -725,6 +815,55 @@ export class Orchestrator extends EventEmitter {
         ? 'OLLAMA_UNAVAILABLE'
         : 'STRUCTURED_OUTPUT_INVALID',
     );
+  }
+  async resumePlan(id: string) {
+    const task = this.db.getTask(id);
+    const plan = this.db.taskPlan(id);
+    if (!task || task.state !== 'waiting_for_plan_approval' || plan?.status !== 'approved') return;
+    const analysis = this.db.events(id).find((event) => event.type === 'TASK_ANALYSIS_COMPLETED')
+      ?.payload as TaskAnalysis | undefined;
+    if (!analysis) throw new Error('TASK_ANALYSIS_MISSING');
+    this.event(id, 'PLAN_APPROVED', 'waiting_for_plan_approval', 'Người dùng đã đồng ý kế hoạch.');
+    await this.execute(id, task.userInput, analysis, 'waiting_for_plan_approval', DEFAULT_BUDGET);
+  }
+  rejectPlan(id: string) {
+    const task = this.db.getTask(id);
+    if (!task || task.state !== 'waiting_for_plan_approval') return;
+    this.db.decideTaskPlan(id, 'rejected');
+    this.db.updateTask(id, 'cancelled', { errorCode: 'PLAN_REJECTED', errorMessage: 'Plan rejected by user' });
+    this.event(id, 'PLAN_REJECTED', 'cancelled', 'Người dùng đã từ chối kế hoạch.');
+  }
+  private async planAutonomously(
+    input: string,
+    analysis: TaskAnalysis,
+    signal: AbortSignal,
+  ): Promise<AutonomousPlan | undefined> {
+    if (process.env.AGENT_AUTONOMOUS_PLANNER === 'false' || signal.aborted) return undefined;
+    try {
+      return await this.planner.plan(
+        input,
+        analysis,
+        this.db.listSkills().flatMap((skill) => skill.manifest.capabilities),
+      );
+    } catch {
+      // The deterministic analyser remains a resilient fallback when an AI plan
+      // is unavailable or invalid; tasks do not fail simply because planning did.
+      return undefined;
+    }
+  }
+  private async assertProducedArtifacts(result: unknown) {
+    const paths = collectArtifacts(result);
+    if (!paths.length) throw new Error('ARTIFACT_MISSING');
+    for (const path of paths) await stat(safePath(this.workspace, path));
+  }
+  private assertCompletionContract(analysis: TaskAnalysis, results: unknown[]) {
+    const requiredExtensions = analysis.constraints
+      .filter((constraint) => constraint.startsWith('artifact:'))
+      .map((constraint) => constraint.slice('artifact:'.length).toLowerCase());
+    if (!requiredExtensions.length) return;
+    const artifacts = collectArtifacts(results).map((path) => path.toLowerCase());
+    if (!requiredExtensions.every((extension) => artifacts.some((path) => path.endsWith(extension))))
+      throw new Error('ARTIFACT_MISSING');
   }
   private event(
     taskId: string,
@@ -769,12 +908,134 @@ export function normalizeLanguageTask(input: string, analysis: TaskAnalysis): Ta
   };
 }
 
+export function normalizeArtifactTask(input: string, analysis: TaskAnalysis): TaskAnalysis {
+  const extension = inferArtifactExtension(input);
+  if (!extension) return analysis;
+  const sourcePath = inferFilesystemPath(input);
+  const capability = artifactCapability(extension);
+  return {
+    ...analysis,
+    category: 'filesystem',
+    objectives: [`Read ${sourcePath}`, `Generate a ${extension} artifact`],
+    requiredCapabilities: uniqueCapabilities(['filesystem:read', capability]),
+    constraints: [
+      ...analysis.constraints,
+      `Create and verify a ${extension} file in .local-agent/output`,
+      `artifact:${extension}`,
+    ],
+  };
+}
+
+/**
+ * Keep simple read/show requests literal.  Model analysis is still used for
+ * open-ended work, but it must not turn "read README.md" into a generated
+ * catch-all skill or a second, non-actionable plan item.
+ */
+export function normalizeFilesystemTask(input: string, analysis: TaskAnalysis): TaskAnalysis {
+  const sourcePath = inferFilesystemPath(input);
+  const readsFile =
+    sourcePath !== '.' &&
+    /\b(read|show|display|view)\b|\u0111\u1ecdc|hi\u1ec3n th\u1ecb|m\u1edf/i.test(input);
+  const createsArtifact = analysis.constraints.some((constraint) => constraint.startsWith('artifact:'));
+  const hasLanguageOperation = analysis.requiredCapabilities.some((capability) =>
+    capability.startsWith('language:'),
+  );
+
+  if (!readsFile || createsArtifact || hasLanguageOperation) return analysis;
+
+  return {
+    ...analysis,
+    category: 'filesystem',
+    intent: `Read ${sourcePath}`,
+    objectives: [`Read ${sourcePath}`],
+    requiredCapabilities: ['filesystem:read'],
+    estimatedRisk: 'low',
+  };
+}
+
+export function inferArtifactExtension(input: string): string | undefined {
+  const value = input.toLowerCase();
+  if (!/\b(export|convert)\b|tạo|xuất|chuyển|\bsang\b/i.test(value)) return undefined;
+  const target = value.match(/(?:tạo(?:\s+thành)?|xuất(?:\s+ra)?|chuyển(?:\s+.*)?\s+sang|file)\s+(?:file\s+)?\.?\s*(pdf|docx|word|xlsx|excel|csv|json|html|markdown|md|text|txt|svg)\b/i)?.[1];
+  const named = [...value.matchAll(/\b(pdf|docx|word|xlsx|excel|csv|json|html|markdown|md|text|txt|svg)\b/g)].at(-1)?.[1];
+  const aliases: Record<string, string> = {
+    pdf: '.pdf', docx: '.docx', word: '.docx', xlsx: '.xlsx', excel: '.xlsx', csv: '.csv',
+    json: '.json', html: '.html', markdown: '.md', md: '.md', text: '.txt', txt: '.txt', svg: '.svg',
+  };
+  const format = target ?? named;
+  return format ? aliases[format] : undefined;
+}
+
+function buildPlanProposal(input: string, analysis: TaskAnalysis) {
+  const sourcePath = inferFilesystemPath(input);
+  const extension = inferArtifactExtension(input);
+  if (extension) {
+    const format = extension.slice(1).toUpperCase();
+    return {
+      goal: input,
+      steps: [
+        {
+          id: 'proposal-1',
+          order: 1,
+          title: `Đọc nội dung ${sourcePath === '.' ? 'nguồn được yêu cầu' : `file ${sourcePath}`}`,
+          description: 'Lấy đúng nội dung từ đường dẫn người dùng chỉ định.',
+          capabilities: ['filesystem:read'],
+        },
+        {
+          id: 'proposal-2',
+          order: 2,
+          title: `Tạo file ${format} từ nội dung đã đọc`,
+          description: `Lưu file ${format} vào .local-agent/output.`,
+          capabilities: analysis.requiredCapabilities.filter((item) => item !== 'filesystem:read'),
+        },
+        {
+          id: 'proposal-3',
+          order: 3,
+          title: `Kiểm tra và cung cấp file ${format}`,
+          description: 'Xác minh artifact tồn tại, đúng định dạng và tạo link tải xuống.',
+          capabilities: [],
+        },
+      ],
+    };
+  }
+  return {
+    goal: input,
+    steps: analysis.objectives.map((objective, index) => ({
+      id: `proposal-${index + 1}`,
+      order: index + 1,
+      title: humanizeObjective(objective, index),
+      description: 'Thực hiện mục tiêu này theo yêu cầu đã nhập.',
+      capabilities: analysis.requiredCapabilities,
+    })),
+  };
+}
+
+function humanizeObjective(objective: string, index: number) {
+  if (/parse|extract|requiredcapabilities|constraints|estimatedrisk/i.test(objective) || objective.length > 100)
+    return `Hoàn thành mục tiêu ${index + 1} của yêu cầu`;
+  return objective;
+}
+
+function artifactCapability(extension: string) {
+  return ({ '.pdf': 'document:pdf', '.docx': 'document:docx', '.xlsx': 'spreadsheet:xlsx', '.csv': 'data:csv', '.json': 'data:json', '.html': 'document:html', '.md': 'document:markdown', '.txt': 'document:text', '.svg': 'image:svg' } as Record<string, string>)[extension] ?? 'document:text';
+}
+
 type RoutableSkill = {
   id: string;
   name: string;
   description: string;
   manifest: SkillManifest;
 };
+
+function isRecoverySkill(skill: RoutableSkill) {
+  if (skill.manifest.runtime.type !== 'workflow') return false;
+  const definition = skill.manifest.definition;
+  return (
+    Boolean(definition) &&
+    typeof definition === 'object' &&
+    'generatedFromError' in definition
+  );
+}
 
 export function selectSkillsForCapabilities<T extends RoutableSkill>(
   skills: T[],
@@ -862,7 +1123,7 @@ export function requiresUserPermission(manifest: SkillManifest) {
   const permissions = manifest.permissions;
   return (
     manifest.approvalRequired ||
-    permissions.filesystem.write.length > 0 ||
+    permissions.filesystem.write.some((path) => path !== '.local-agent/output/*') ||
     permissions.commands.length > 0 ||
     permissions.network.enabled ||
     permissions.environmentVariables.length > 0
@@ -875,7 +1136,15 @@ function collectArtifacts(value: unknown): string[] {
     if (typeof item === 'string' && /(?:^|[\\/])[^\\/]+\.[a-z0-9]{2,8}$/i.test(item))
       found.add(item);
     else if (Array.isArray(item)) item.forEach(visit);
-    else if (item && typeof item === 'object') Object.values(item).forEach(visit);
+    else if (item && typeof item === 'object') {
+      const object = item as { file?: unknown; artifacts?: unknown };
+      if (typeof object.file === 'string') found.add(object.file);
+      if (Array.isArray(object.artifacts))
+        object.artifacts
+          .filter((path): path is string => typeof path === 'string')
+          .forEach((path) => found.add(path));
+      Object.values(item).forEach(visit);
+    }
   };
   visit(value);
   return [...found];
