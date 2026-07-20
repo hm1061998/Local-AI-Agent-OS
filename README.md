@@ -1,6 +1,6 @@
 # Local Agent OS — Phase 1 Web
 
-Local-first AI agent with a React web interface, NestJS API, SQLite, and DeepSeek through Ollama. Phase 1 includes structured task analysis, six static skills, a bounded FSM orchestrator, persisted operational events, cancellation, and a live execution timeline. It does not generate executable skills.
+Local-first AI agent with a React web interface, NestJS API, SQLite, and DeepSeek through Ollama. The runtime can use Ollama only, a paid OpenAI-compatible endpoint only, or local-first automatic fallback to the paid endpoint when local inference is unavailable.
 
 Phase 2 adds a semantic skill registry, prompt/workflow proposals, versioning, approval workflows, safe ZIP import/export, Approval Center (`/approvals`), and Skill Studio (`/skills`). Executable TypeScript/Python generation remains forbidden.
 
@@ -24,6 +24,12 @@ yarn playwright install chromium
 ```
 
 Set `AGENT_WORKSPACE` in `.env` to the only directory skills may access.
+
+## Model and tool fallback
+
+The default (`AI_PROVIDER=auto`) tries Ollama first and uses a paid OpenAI-compatible endpoint only if `OPENAI_API_KEY` is configured and local inference fails. Use `AI_PROVIDER=local` or `AI_PROVIDER=paid` to force one route. Optional values are `OPENAI_BASE_URL`, `OPENAI_CHAT_MODEL`, and `OPENAI_EMBED_MODEL`.
+
+The agent creates a safe declarative recovery skill when routing fails or a compatible skill errors. Tool installation is deliberately constrained to the static `managedTools` allow-list and is enabled by default; set `AGENT_AUTO_INSTALL_TOOLS=false` to report missing tools without modifying the workspace.
 
 `OLLAMA_NUM_GPU=0` is the safe default and runs Ollama inference on CPU. Increase it only after confirming the local CUDA driver and Ollama GPU runner are stable.
 

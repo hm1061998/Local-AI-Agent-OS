@@ -21,7 +21,7 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { cpus, freemem, totalmem, loadavg } from 'node:os';
 import { z } from 'zod';
-import { OllamaModelProvider } from '@local-agent/model-provider';
+import { createModelProvider } from '@local-agent/model-provider';
 import {
   DockerSandboxRunner,
   materializePackage,
@@ -59,12 +59,14 @@ import {
   runLocalBenchmark,
   type AgentMode,
 } from './multi-agent';
+import { ToolInstaller, managedTools } from './tool-installer';
 @Injectable()
 export class RuntimeService {
   readonly db = new AgentDatabase();
-  readonly model = new OllamaModelProvider();
+  readonly model = createModelProvider();
   readonly orchestrator = new Orchestrator(this.db, this.model);
   readonly sandbox = new DockerSandboxRunner();
+  readonly tools = new ToolInstaller();
   constructor() {
     manifests.forEach((m) => this.db.installSkill(m));
   }
@@ -199,6 +201,18 @@ export class ApiController {
   }
   @Get('models/health') modelHealth() {
     return this.r.model.healthCheck();
+  }
+  @Get('tools') tools() {
+    return Promise.all(
+      managedTools.map(async (tool) => ({
+        ...tool,
+        install: undefined,
+        status: await this.r.tools.status(tool),
+      })),
+    );
+  }
+  @Post('tools/ensure') ensureTools(@Body() body: { capabilities?: string[] }) {
+    return this.r.tools.ensureCapabilities(body.capabilities ?? []);
   }
   @Get('skills') skills() {
     return this.r.db.listSkills();

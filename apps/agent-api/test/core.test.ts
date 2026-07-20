@@ -5,6 +5,8 @@ import { MockModelProvider } from '@local-agent/test-utils';
 import type { StructuredGenerationRequest } from '@local-agent/model-provider';
 import {
   ModelProviderError,
+  OpenAICompatibleModelProvider,
+  FallbackModelProvider,
   OllamaModelProvider,
   parseStructuredJson,
 } from '@local-agent/model-provider';
@@ -328,5 +330,25 @@ describe('integration', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+  it('uses an OpenAI-compatible paid endpoint without exposing its API key', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(analysis) } }] }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const provider = new OpenAICompatibleModelProvider({ baseUrl: 'https://paid.test/v1', apiKey: 'secret', chatModel: 'paid-model' });
+      await expect(provider.generateStructured({ prompt: 'analyze', schema: taskAnalysisSchema })).resolves.toEqual(analysis);
+      const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+      expect(request.headers).toMatchObject({ authorization: 'Bearer secret' });
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it('falls back to the paid provider when local inference fails', async () => {
+    class OfflineProvider extends MockModelProvider {
+      override async generateStructured<T>(): Promise<T> { throw new Error('OLLAMA_UNAVAILABLE'); }
+    }
+    const local = new OfflineProvider();
+    const paid = new MockModelProvider(analysis);
+    await expect(new FallbackModelProvider(local, paid).generateStructured({ prompt: 'analyze', schema: taskAnalysisSchema })).resolves.toEqual(analysis);
   });
 });

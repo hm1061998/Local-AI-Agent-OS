@@ -12,6 +12,7 @@ import { DEFAULT_BUDGET, taskAnalysisSchema } from '@local-agent/shared-types';
 import { AgentDatabase } from './database';
 import { createPlan, executeSkill, inferFilesystemPath, validatePlan } from './skills';
 import { createProposal } from './phase2';
+import { ToolInstaller } from './tool-installer';
 
 const meaningfulValueSchema = z
   .union([
@@ -114,6 +115,7 @@ export class Orchestrator extends EventEmitter {
     private db: AgentDatabase,
     private model: ModelProvider,
     private workspace = process.env.AGENT_WORKSPACE ?? process.cwd(),
+    private tools = new ToolInstaller(workspace),
   ) {
     super();
   }
@@ -198,6 +200,17 @@ export class Orchestrator extends EventEmitter {
         'Đang tìm skill phù hợp.',
       );
       const active = this.db.listSkills().filter((skill) => skill.status === 'active');
+      const toolResults = await this.tools.ensureCapabilities(analysis.requiredCapabilities);
+      for (const tool of toolResults) {
+        if (tool.status === 'installed')
+          this.event(
+            id,
+            'SKILL_AUTO_INSTALLED',
+            state,
+            `Đã tự cài tool ${tool.tool.id} cho tác vụ.`,
+            { tool: tool.tool.id, capability: tool.tool.capability },
+          );
+      }
       const required = new Set(analysis.requiredCapabilities.map((value) => value.toLowerCase()));
       let matches = active.filter(
         (skill) =>
@@ -503,11 +516,7 @@ export class Orchestrator extends EventEmitter {
               attempt,
               reason: message,
             });
-            if (
-              attempt === 0 &&
-              stepSkill.manifest.runtime.type !== 'prompt' &&
-              isRecoverableSkillFailure(message)
-            ) {
+            if (attempt === 0 && isRecoverableSkillFailure(message)) {
               try {
                 result = await this.recoverWithGeneratedSkill({
                   taskId: id,
@@ -637,7 +646,21 @@ export class Orchestrator extends EventEmitter {
       `Đã tạo và kích hoạt skill thay thế ${manifest.name}.`,
       { skillId: manifest.id, manifest, replaces: failedSkill.id },
     );
-    const result = await executeSkill(failedSkill.id, repaired.input, this.workspace, signal);
+    if (failedSkill.runtime.type === 'prompt') guard.modelCall();
+    const result =
+      failedSkill.runtime.type === 'prompt'
+        ? await this.model.generateStructured({
+            prompt: [
+              `Execute replacement prompt skill "${manifest.name}".`,
+              `Purpose: ${manifest.description}`,
+              `Original request: ${request}`,
+              `Corrected skill input: ${JSON.stringify(repaired.input)}`,
+              'Return the completed user-facing result in output, not a plan or explanation.',
+            ].join('\n'),
+            schema: skillExecutionResultSchema,
+            signal,
+          })
+        : await executeSkill(failedSkill.id, repaired.input, this.workspace, signal);
     this.event(
       taskId,
       'SKILL_EVALUATION_COMPLETED',
